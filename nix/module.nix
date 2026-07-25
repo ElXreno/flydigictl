@@ -1,4 +1,4 @@
-flydigictl:
+packages:
 {
   config,
   lib,
@@ -16,8 +16,18 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = flydigictl;
+      default = packages.default;
       description = "The flydigictl package to use.";
+    };
+
+    gui = {
+      enable = lib.mkEnableOption "the desktop interface";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = packages.gui;
+        description = "The flydigictl-gui package to use.";
+      };
     };
   };
 
@@ -68,6 +78,12 @@ in
   };
 
   config = lib.mkMerge [
+    (lib.mkIf cfg.gui.enable {
+      # The interface talks to the daemon and never to the cooler, so it needs
+      # nothing beyond the socket group its user is already in.
+      environment.systemPackages = [ cfg.gui.package ];
+    })
+
     (lib.mkIf (cfg.enable || daemon.enable) {
       environment.systemPackages = [ cfg.package ];
 
