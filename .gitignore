@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+
+# Nix build output
+result
+
+# Claude Code project memory
+.claude/
+
+# direnv
+.direnv/

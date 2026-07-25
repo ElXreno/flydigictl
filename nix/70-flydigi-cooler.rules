@@ -1,0 +1,11 @@
+# Flydigi BS series coolers.
+#
+# The 70- prefix matters: systemd's 73-seat-late.rules runs the uaccess
+# builtin, so a rule sorting after it tags the device too late to get an ACL.
+
+# USB-attached
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="37d7", MODE="0660", TAG+="uaccess"
+
+# Bluetooth-attached coolers hang off uhid and have no USB parent to carry
+# idVendor, so match the vendor id in the hid device name (bus:vid:pid.instance).
+SUBSYSTEM=="hidraw", KERNELS=="*:37D7:*", MODE="0660", TAG+="uaccess"

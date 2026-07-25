@@ -1,0 +1,14 @@
+[package]
+name = "flydigictl"
+version = "0.1.0"
+edition = "2021"
+description = "Control Flydigi BS series laptop coolers on Linux"
+repository = "https://github.com/ElXreno/flydigictl"
+license = "MIT"
+
+[dependencies]
+argh = "0.1"
+nix = { version = "0.29", default-features = false, features = ["poll"] }
+thiserror = "2"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
