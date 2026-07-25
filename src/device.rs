@@ -14,7 +14,7 @@ use log::debug;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 use crate::error::{Error, Result};
-use crate::protocol::{self, Model, Status, REPORT_LEN, VID};
+use crate::protocol::{self, Model, Status, VID};
 
 pub struct Found {
     pub path: PathBuf,
@@ -100,12 +100,45 @@ impl Device {
         })
     }
 
-    pub fn send(&mut self, report: [u8; REPORT_LEN]) -> Result<()> {
-        self.file.write_all(&report).map_err(Error::Write)
+    pub fn send(&mut self, report: impl AsRef<[u8]>) -> Result<()> {
+        self.file.write_all(report.as_ref()).map_err(Error::Write)
+    }
+
+    /// Send a command and wait for the device to acknowledge it, returning the
+    /// status byte it echoes back.
+    ///
+    /// A report the firmware does not understand is dropped silently, so a
+    /// missing acknowledgement is the only signal that a command was rejected.
+    pub fn send_acked(
+        &mut self,
+        report: [u8; protocol::REPORT_LEN],
+        timeout: Duration,
+    ) -> Result<u8> {
+        let cmd = report[3];
+        self.send(report)?;
+
+        self.read_matching(timeout, |buf| {
+            protocol::parse_ack(buf)
+                .filter(|ack| ack.cmd == cmd)
+                .map(|ack| ack.payload.first().copied().unwrap_or_default())
+        })
+        .map_err(|err| match err {
+            Error::Timeout => Error::NoAck { cmd },
+            other => other,
+        })
     }
 
     /// Wait for the next status notification, ignoring unrelated frames.
     pub fn read_status(&mut self, timeout: Duration) -> Result<Status> {
+        self.read_matching(timeout, protocol::parse_status)
+    }
+
+    /// Read frames until `want` accepts one, or the deadline passes.
+    fn read_matching<T>(
+        &mut self,
+        timeout: Duration,
+        mut want: impl FnMut(&[u8]) -> Option<T>,
+    ) -> Result<T> {
         let deadline = std::time::Instant::now() + timeout;
         let mut buf = [0u8; 64];
 
@@ -143,8 +176,8 @@ impl Device {
                 Err(err) => return Err(Error::Read(err)),
             };
 
-            if let Some(status) = protocol::parse_status(&buf[..n]) {
-                return Ok(status);
+            if let Some(matched) = want(&buf[..n]) {
+                return Ok(matched);
             }
         }
     }

@@ -13,6 +13,8 @@ use error::{Error, Result};
 use protocol::{MAX_RPM, MIN_RPM};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
+const LIGHT_GAP: Duration = Duration::from_millis(5);
+const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Control Flydigi BS series laptop coolers
 #[derive(argh::FromArgs)]
@@ -33,6 +35,7 @@ enum Command {
     Watch(WatchCmd),
     Set(SetCmd),
     Auto(AutoCmd),
+    Light(LightCmd),
 }
 
 /// list detected coolers
@@ -67,6 +70,41 @@ struct SetCmd {
 #[derive(argh::FromArgs)]
 #[argh(subcommand, name = "auto")]
 struct AutoCmd {}
+
+/// control the lighting
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "light")]
+struct LightCmd {
+    #[argh(subcommand)]
+    what: LightWhat,
+}
+
+#[derive(argh::FromArgs)]
+#[argh(subcommand)]
+enum LightWhat {
+    Off(LightOffCmd),
+    Temp(LightTempCmd),
+    Gear(LightGearCmd),
+}
+
+/// turn the RGB strip off
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "off")]
+struct LightOffCmd {}
+
+/// let the firmware drive the strip by temperature
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "temp")]
+struct LightTempCmd {}
+
+/// toggle the gear indicator LEDs
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "gear")]
+struct LightGearCmd {
+    /// on or off
+    #[argh(positional)]
+    state: String,
+}
 
 /// Retry until the cooler shows up again; it re-enumerates a couple of seconds
 /// after a power blip.
@@ -158,9 +196,9 @@ fn run() -> Result<()> {
                 });
             }
 
-            dev.send(protocol::enter_realtime())?;
+            dev.send_acked(protocol::enter_realtime(), ACK_TIMEOUT)?;
             std::thread::sleep(Duration::from_millis(300));
-            dev.send(protocol::set_realtime_rpm(cmd.rpm))?;
+            dev.send_acked(protocol::set_realtime_rpm(cmd.rpm), ACK_TIMEOUT)?;
 
             if stopping {
                 info!("fan stopped");
@@ -173,9 +211,34 @@ fn run() -> Result<()> {
         }
 
         Command::Auto(_) => {
-            dev.send(protocol::exit_realtime())?;
+            dev.send_acked(protocol::exit_realtime(), ACK_TIMEOUT)?;
             info!("released to gear mode");
         }
+
+        Command::Light(cmd) => match cmd.what {
+            LightWhat::Off(_) => {
+                dev.send_acked(protocol::light_off(), ACK_TIMEOUT)?;
+                info!("strip off");
+            }
+
+            LightWhat::Temp(_) => {
+                for report in protocol::light_smart_temp() {
+                    dev.send_acked(report, ACK_TIMEOUT)?;
+                    std::thread::sleep(LIGHT_GAP);
+                }
+                info!("strip on temperature effect");
+            }
+
+            LightWhat::Gear(gear) => {
+                let on = match gear.state.as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    other => return Err(Error::BadArgument(other.to_string())),
+                };
+                dev.send_acked(protocol::gear_light(on), ACK_TIMEOUT)?;
+                info!("gear LEDs {}", if on { "on" } else { "off" });
+            }
+        },
     }
 
     Ok(())

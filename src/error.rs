@@ -30,6 +30,12 @@ pub enum Error {
 
     #[error("rpm {rpm} out of range ({min}-{max}, or 0 to stop)")]
     RpmOutOfRange { rpm: u16, min: u16, max: u16 },
+
+    #[error("expected on or off, got {0}")]
+    BadArgument(String),
+
+    #[error("command 0x{cmd:02x} not acknowledged")]
+    NoAck { cmd: u8 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

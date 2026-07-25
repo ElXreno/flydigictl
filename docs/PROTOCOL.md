@@ -38,6 +38,28 @@ Both directions use 25-byte reports:
 - `len` is `2 + payload length`.
 - `checksum = (cmd + len + sum(payload)) & 0xFF`.
 
+That length is not negotiable. THRM pads lighting commands to 65 bytes, and a
+BS3 Pro drops those on the floor - no effect, no error, no reply. The same
+command in a 25-byte report works.
+
+Commands are acknowledged with `01 5A A5 <cmd> 03 01 <checksum>`, so a missing
+reply means the device did not accept the report at all. Verified both ways: a
+made-up command (`0x7E`) and a 65-byte report both go unanswered, while every
+command below is acknowledged.
+
+Queries answer with data in the same shape. Captured from a BS3 Pro:
+
+| Query  | Payload             | Reading                                     |
+|--------|---------------------|---------------------------------------------|
+| `0x01` | `00 00 02 04`       | device info, likely firmware 2.4            |
+| `0x02` | `01`                | config flag                                 |
+| `0x04` | `xx xx xx xx xx xx` | config snapshot, not decoded                |
+| `0x25` | `01`               | work mode                                    |
+| `0x27` | `a4 06 60 09 b8 0b 74 0e` | gear speeds: 1700, 2400, 3000, 3700 |
+
+Note that `0x27` returns exactly four values, one per gear. The low/medium/high
+split inside each gear exists only in the vendor app.
+
 ## Status notification (`0xEF`)
 
 The device pushes these unprompted, roughly four times a second:
@@ -72,13 +94,14 @@ reports `0x02`/`0x03` instead, so treat the value as model-specific.
 | `0x23` | Enter realtime mode | none               | yes      |
 | `0x24` | Exit realtime mode  | none               | yes      |
 | `0x26` | Set gear RPM        | gear, RPM LE       | no       |
-| `0x45` | RGB status          | unknown            | no       |
-| `0x46` | RGB enable          | unknown            | no       |
-| `0x48` | Gear indicator LED  | unknown            | no       |
-| `0x01` | Query device info   | none               | no       |
-| `0x04` | Query config        | none               | no       |
-| `0x25` | Query work mode     | none               | no       |
-| `0x27` | Query gear RPM table| none               | no       |
+| `0x44` | Temperature effect  | `01`               | yes      |
+| `0x45` | Select strip        | none, then `01`    | yes      |
+| `0x46` | Strip power         | `00` off, `01` on  | yes      |
+| `0x48` | Gear indicator LED  | `00` off, `01` on  | yes      |
+| `0x01` | Query device info   | none               | yes      |
+| `0x04` | Query config        | none               | yes      |
+| `0x25` | Query work mode     | none               | yes      |
+| `0x27` | Query gear RPM table| none               | yes      |
 
 Setting a fixed speed is `0x23` followed by `0x21`:
 
