@@ -136,6 +136,7 @@ the target on every tick, and pins the cooler in an override it never leaves.
 | `0x01` | Query device info   | none               | yes      |
 | `0x04` | Query MAC address   | none               | yes      |
 | `0x02` | Query power state   | none               | yes      |
+| `0x07` | Query supply level  | none               | yes      |
 | `0x25` | Query work mode     | none               | yes      |
 | `0x27` | Query gear RPM table| none               | yes      |
 
@@ -165,12 +166,27 @@ away if the currently selected gear is the one being changed:
 Unlike most commands the acknowledgement carries a meaningful status byte: `01`
 if the gear was stored, `00` if the index was out of range.
 
-Gear limits do live in the firmware, contrary to what the vendor app suggests.
-A global holds a supply level of 1, 2 or 3, and `0x26` applies a gear only when
-the level allows it: level 1 permits the two lowest gears, level 2 everything
-but the top one, and level 3 all four. That is the mechanism behind the
-documented "2700 RPM on laptop USB" ceiling, and with a PD adapter in the side
-USB-C port the cooler reports level 3 and accepts the top gear.
+### Supply levels
+
+Speed limits live in the firmware, contrary to what the vendor app suggests. A
+global holds a supply level of 1, 2 or 3, written by the power event handler
+and readable with `0x07`, and it is enforced twice over:
+
+| Level | Highest gear | Speed ceiling |
+|-------|--------------|---------------|
+| 1     | standard     | 2700 RPM      |
+| 2     | strong       | 3300 RPM      |
+| 3     | overclock    | 4000 RPM      |
+
+`0x26` stores a gear speed whatever the level, but only applies the gear when
+the level allows it. The control loop then clamps *every* target to the ceiling
+above, realtime ones included - so a cooler on bus power accepts `0x21 4000`,
+acknowledges it and quietly holds 2700. This is the mechanism behind the
+documented "2700 RPM on laptop USB" limit, and the reason a client should read
+`0x07` before reporting a target back to the user.
+
+Only level 3 has been seen on hardware here (a PD adapter in the side USB-C
+port); the two lower rows come from the disassembly.
 
 Losing power even briefly - a PD renegotiation on a shared GaN charger will do
 it - drops the Bluetooth link and takes the hidraw node with it.

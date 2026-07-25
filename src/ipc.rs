@@ -59,6 +59,8 @@ pub enum WarningCode {
     ConfigReadOnly,
     /// The config is writable in principle, but saving failed.
     ConfigSaveFailed,
+    /// The cooler's power supply caps the speed below what was asked for.
+    SupplyLimited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +71,13 @@ pub struct Status {
     pub current_rpm: Option<u16>,
     pub target_rpm: Option<u16>,
     pub manual: bool,
+
+    /// What the cooler is powered by: `low`, `medium`, `full` or unknown.
+    pub supply: Option<String>,
+
+    /// The speed the supply allows. A target above this is clamped by the
+    /// firmware, so a client showing the curve should show this line too.
+    pub supply_max_rpm: Option<u16>,
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,
