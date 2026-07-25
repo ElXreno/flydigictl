@@ -31,6 +31,9 @@ pub enum Error {
     #[error("rpm {rpm} out of range ({min}-{max}, or 0 to stop)")]
     RpmOutOfRange { rpm: u16, min: u16, max: u16 },
 
+    #[error("bad colour: {0}")]
+    BadColor(String),
+
     #[error("expected on or off, got {0}")]
     BadArgument(String),
 
