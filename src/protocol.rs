@@ -84,23 +84,35 @@ impl Model {
     }
 }
 
-/// Fan mode reported in byte 6 of a status frame.
+/// Fan mode from byte 6 of a status frame.
 ///
-/// BS3 Pro reports `0x02`/`0x03` here; BS2 Pro is documented as `0x04`/`0x05`,
-/// so treat unknown values as opaque rather than rejecting the frame.
+/// The byte is a bitfield, not an enum: bit 0 is the realtime override and bits
+/// 2 and 3 carry the standby setting. Measured across every combination:
+///
+/// | standby | gear   | realtime |
+/// |---------|--------|----------|
+/// | off     | `0x02` | `0x03`   |
+/// | instant | `0x06` | `0x07`   |
+/// | delayed | `0x0a` | `0x0b`   |
+///
+/// The `0x04`/`0x05` pair documented for a BS2 Pro is the same thing with
+/// instant standby enabled, so there is nothing model-specific here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Gear,
     Realtime,
-    Unknown(u8),
 }
+
+const MODE_REALTIME: u8 = 0x01;
+const MODE_STANDBY_INSTANT: u8 = 0x04;
+const MODE_STANDBY_DELAYED: u8 = 0x08;
 
 impl Mode {
     fn from_byte(b: u8) -> Self {
-        match b {
-            0x02 | 0x04 => Self::Gear,
-            0x03 | 0x05 => Self::Realtime,
-            other => Self::Unknown(other),
+        if b & MODE_REALTIME != 0 {
+            Self::Realtime
+        } else {
+            Self::Gear
         }
     }
 }
@@ -110,7 +122,6 @@ impl std::fmt::Display for Mode {
         match self {
             Self::Gear => write!(f, "gear"),
             Self::Realtime => write!(f, "realtime"),
-            Self::Unknown(b) => write!(f, "unknown(0x{b:02x})"),
         }
     }
 }
@@ -166,6 +177,9 @@ pub struct Status {
     pub current_rpm: u16,
     pub target_rpm: u16,
     pub mode: Mode,
+    /// Standby setting the cooler reports, which is where it is actually
+    /// stored: the daemon can check its config took effect.
+    pub standby: Standby,
     /// Highest gear the device will use.
     pub max_gear: Gear,
     /// Currently selected gear.
@@ -223,6 +237,17 @@ pub enum Standby {
 }
 
 impl Standby {
+    /// Read the standby setting back out of a status frame.
+    fn from_mode_byte(b: u8) -> Self {
+        if b & MODE_STANDBY_DELAYED != 0 {
+            Self::Delayed
+        } else if b & MODE_STANDBY_INSTANT != 0 {
+            Self::Instant
+        } else {
+            Self::Off
+        }
+    }
+
     fn code(self) -> u8 {
         match self {
             Self::Off => 0,
@@ -512,6 +537,7 @@ pub fn parse_status(buf: &[u8]) -> Option<Status> {
         max_gear: Gear::ceiling(payload[0] >> 4),
         gear: Gear::selected(payload[0] & 0x0F),
         mode: Mode::from_byte(payload[1]),
+        standby: Standby::from_mode_byte(payload[1]),
         current_rpm: u16::from_le_bytes([payload[3], payload[4]]),
         target_rpm: u16::from_le_bytes([payload[5], payload[6]]),
         seq: u16::from_le_bytes([payload[9], payload[10]]),
@@ -534,9 +560,30 @@ mod tests {
         assert_eq!(status.current_rpm, 1900);
         assert_eq!(status.target_rpm, 1900);
         assert_eq!(status.mode, Mode::Realtime);
+        assert_eq!(status.standby, Standby::Off);
         assert_eq!(status.max_gear, Gear::Overclock);
         assert_eq!(status.gear, Gear::Quiet);
         assert_eq!(status.seq, 0x23B4);
+    }
+
+    #[test]
+    fn mode_byte_is_a_bitfield() {
+        // Measured on hardware across every standby setting.
+        for (byte, mode, standby) in [
+            (0x02, Mode::Gear, Standby::Off),
+            (0x03, Mode::Realtime, Standby::Off),
+            (0x06, Mode::Gear, Standby::Instant),
+            (0x07, Mode::Realtime, Standby::Instant),
+            (0x0a, Mode::Gear, Standby::Delayed),
+            (0x0b, Mode::Realtime, Standby::Delayed),
+        ] {
+            assert_eq!(Mode::from_byte(byte), mode, "mode of 0x{byte:02x}");
+            assert_eq!(
+                Standby::from_mode_byte(byte),
+                standby,
+                "standby of 0x{byte:02x}"
+            );
+        }
     }
 
     #[test]
