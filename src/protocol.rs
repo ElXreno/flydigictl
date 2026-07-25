@@ -21,7 +21,6 @@ pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
 pub const CMD_LIGHT_APPLY: u8 = 0x43;
-pub const CMD_LIGHT_EFFECT: u8 = 0x44;
 pub const CMD_LIGHT_SELECT: u8 = 0x45;
 pub const CMD_LIGHT_POWER: u8 = 0x46;
 pub const CMD_LIGHT_FRAME: u8 = 0x47;
@@ -210,22 +209,130 @@ pub fn light_off() -> [u8; REPORT_LEN] {
     build_report(CMD_LIGHT_POWER, &[0x00])
 }
 
-/// Highest built-in effect the firmware implements.
-pub const MAX_EFFECT: u8 = 5;
+/// Number of built-in effects the firmware carries.
+pub const EFFECT_COUNT: u8 = 5;
 
-/// Select a lighting effect.
+/// Size of the effect buffer: 18 frames of 10 bytes.
+const BUFFER_LEN: usize = 180;
+
+/// Rebuild the buffer the firmware would install for a built-in effect.
 ///
-/// Mode 0 plays the uploaded buffer; 1 to [`MAX_EFFECT`] are presets baked into
-/// the firmware. The presets are gated: the handler bails out unless the fan is
-/// in realtime mode, and it acknowledges the command either way, so a silent
-/// no-op is indistinguishable from success on the wire.
-pub fn light_effect(mode: u8) -> Vec<[u8; REPORT_LEN]> {
-    vec![
+/// Asking the device for a preset with `0x44` only works while it is in
+/// realtime mode, and leaving that mode runs `set_effect(0)`, which drops the
+/// strip straight back to this buffer. Uploading the preset's own palette is
+/// therefore the only way to keep it playing in gear mode - the byte patterns
+/// below are transcribed from `FUN_ram_00005bdc`.
+fn preset_buffer(effect: u8) -> [u8; BUFFER_LEN] {
+    let mut buf = [0u8; BUFFER_LEN];
+
+    // Header: 00 02 00 <mode> <speed> <brightness>
+    let (mode, speed) = match effect {
+        1 => (0x03, 0x0A),
+        2 => (0x03, 0x06),
+        3 => (0x03, 0x02),
+        4 => (0x01, 0x02),
+        _ => (0x02, 0x0A),
+    };
+    buf[1] = 0x02;
+    buf[3] = mode;
+    buf[4] = speed;
+    buf[5] = 100;
+
+    // Presets 1-3 paint four colours at three points of each 90-byte half;
+    // only the hue differs between them.
+    let ramp: Option<[[u8; 3]; 4]> = match effect {
+        1 => Some([
+            [0x00, 0xFF, 0x00],
+            [0x3F, 0xFF, 0x3F],
+            [0xFF, 0xFF, 0xFF],
+            [0x3F, 0xFF, 0x3F],
+        ]),
+        2 => Some([
+            [0xFF, 0xFF, 0x00],
+            [0xFF, 0xFF, 0x3F],
+            [0xFF, 0xFF, 0xFF],
+            [0xFF, 0xFF, 0x3F],
+        ]),
+        3 => Some([
+            [0xFF, 0x00, 0x00],
+            [0xFF, 0x3F, 0x3F],
+            [0xFF, 0xFF, 0xFF],
+            [0xFF, 0x3F, 0x3F],
+        ]),
+        _ => None,
+    };
+
+    if let Some(colors) = ramp {
+        for half in [0usize, 90] {
+            for (group, start) in [6usize, 36, 66].iter().enumerate() {
+                for slot in 0..4 {
+                    // Each group rotates the palette by one position.
+                    let color = colors[(slot + group) % 4];
+                    let at = half + start + slot * 3;
+                    buf[at..at + 3].copy_from_slice(&color);
+                }
+            }
+        }
+        return buf;
+    }
+
+    if effect == 4 {
+        // Solid red repeated every 30 bytes.
+        for base in (0..BUFFER_LEN).step_by(30) {
+            for slot in 0..2 {
+                let at = base + 6 + slot * 3;
+                buf[at..at + 3].copy_from_slice(&[0xFF, 0x00, 0x00]);
+            }
+        }
+        return buf;
+    }
+
+    // Preset 5 writes individual words rather than a repeating pattern.
+    for (offset, bytes) in [
+        (6usize, &[0xFF, 0xFF][..]),
+        (8, &[0xFF, 0x1E, 0x1E, 0xA0][..]),
+        (14, &[0x50][..]),
+        (36, &[0x00, 0x00, 0x50, 0xFF][..]),
+        (40, &[0xFF, 0xFF, 0x1E, 0x1E][..]),
+        (44, &[0xA0][..]),
+        (68, &[0x50, 0x1E, 0x1E, 0xA0][..]),
+        (72, &[0xFF, 0xFF][..]),
+        (74, &[0xFF][..]),
+        (96, &[0xFF, 0xFF, 0xFF, 0x1E][..]),
+        (100, &[0x1E, 0xA0][..]),
+        (104, &[0x50][..]),
+        (128, &[0x50, 0xFF, 0xFF, 0xFF][..]),
+        (132, &[0x1E, 0x1E][..]),
+        (134, &[0xA0][..]),
+        (156, &[0x00, 0x00, 0x50, 0x1E][..]),
+        (160, &[0x1E, 0xA0, 0xFF, 0xFF][..]),
+        (164, &[0xFF][..]),
+    ] {
+        buf[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
+
+    buf
+}
+
+/// Upload a built-in effect's palette and play it.
+pub fn light_effect(effect: u8) -> Vec<[u8; REPORT_LEN]> {
+    let buf = preset_buffer(effect);
+
+    let mut reports = vec![
         build_report(CMD_LIGHT_POWER, &[0x01]),
         build_report(CMD_LIGHT_SELECT, &[]),
         build_report(CMD_LIGHT_SELECT, &[0x01]),
-        build_report(CMD_LIGHT_EFFECT, &[mode]),
-    ]
+    ];
+
+    for (index, chunk) in buf.chunks(STEP_LEN).enumerate() {
+        reports.push(build_report(
+            CMD_LIGHT_FRAME,
+            &[&[index as u8][..], chunk].concat(),
+        ));
+    }
+
+    reports.push(build_report(CMD_LIGHT_APPLY, &[0x01]));
+    reports
 }
 
 /// Toggle the gear indicator LEDs. Unlike the strip, this is a normal

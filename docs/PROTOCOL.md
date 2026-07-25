@@ -188,3 +188,22 @@ nothing has been uploaded.
 Frame indices are limited: `0x00` is the header, `0x01`-`0x11` carry 10 bytes,
 `0x12` carries 6, and higher indices are acknowledged but discarded. The vendor
 app uploads 30 frames; everything past `0x12` never reaches the strip.
+
+### Presets cannot be left running
+
+`0x24` (exit realtime) calls `0x658c(0)`, which runs `set_effect(0)` - leaving
+realtime always drops the strip back to the user buffer. A preset selected with
+`0x44` therefore only plays until the fan leaves realtime mode, and there is no
+command that restores the factory animation.
+
+What does survive is the buffer itself, so a preset can be kept by uploading
+its own palette through `0x47` instead of asking for it by number. The palettes
+live in `FUN_ram_00005bdc` as a 180-byte buffer - exactly 18 frames of 10 bytes
+- with the usual header in the first six bytes and RGB triplets after it.
+
+Two independent light sources, easy to confuse:
+
+| Source | Command | Setting | Rendering |
+|--------|---------|---------|-----------|
+| Gear indicators (1-4) | `0x48` | 3 | lit up to the selected gear, or pulsing while in realtime |
+| Side RGB strip (6 LEDs) | `0x46`, content via `0x43`/`0x44`/`0x47` | 4 | plays the palette regardless of fan mode |

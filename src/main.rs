@@ -110,7 +110,7 @@ struct LightOffCmd {}
 #[derive(argh::FromArgs)]
 #[argh(subcommand, name = "effect")]
 struct LightEffectCmd {
-    /// effect number, 1-5 (0 replays the uploaded colour)
+    /// effect number, 1-5
     #[argh(positional)]
     mode: u8,
 }
@@ -257,33 +257,18 @@ fn run() -> Result<()> {
             }
 
             LightWhat::Effect(cmd) => {
-                if cmd.mode > protocol::MAX_EFFECT {
+                if cmd.mode == 0 || cmd.mode > protocol::EFFECT_COUNT {
                     return Err(Error::UnknownEffect {
                         mode: cmd.mode,
-                        max: protocol::MAX_EFFECT,
+                        max: protocol::EFFECT_COUNT,
                     });
-                }
-
-                // The firmware gates built-in effects behind realtime mode and
-                // still acknowledges them otherwise, so check before promising
-                // anything.
-                if cmd.mode != 0 {
-                    let status = dev.read_status(READ_TIMEOUT)?;
-                    if status.mode != protocol::Mode::Realtime {
-                        return Err(Error::NeedsRealtime);
-                    }
                 }
 
                 for report in protocol::light_effect(cmd.mode) {
                     dev.send_acked(report, ACK_TIMEOUT)?;
                     std::thread::sleep(LIGHT_GAP);
                 }
-
-                if cmd.mode == 0 {
-                    info!("strip on uploaded buffer");
-                } else {
-                    info!("effect {}", cmd.mode);
-                }
+                info!("effect {}", cmd.mode);
             }
 
             LightWhat::Static(cmd) => {
