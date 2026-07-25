@@ -112,3 +112,18 @@ Reconnecting creates a *new* HID device, so an open descriptor is dead even
 when the node reuses its old name. The device may also enumerate more than once
 before it settles - the first node can appear and never deliver a frame - so
 recovery should keep retrying rather than assume the first reopen won.
+
+### Low end, measured
+
+Stepping a BS3 Pro down through realtime targets, ten seconds per step:
+
+| Target | Tachometer                          |
+|--------|-------------------------------------|
+| 700    | follows down, steady                |
+| 500    | steady 500                          |
+| 300    | stalls, reports flip between 0-200  |
+| 100    | stalls, reports flip between 0-400  |
+| 0      | fan stops                           |
+
+So 500 RPM is the practical floor, 0 is a genuine passive mode, and anything in
+between is worse than useless - the fan cannot hold a speed there.

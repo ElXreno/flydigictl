@@ -28,7 +28,7 @@ pub enum Error {
     #[error("device went away")]
     Disconnected,
 
-    #[error("rpm {rpm} out of range ({min}-{max})")]
+    #[error("rpm {rpm} out of range ({min}-{max}, or 0 to stop)")]
     RpmOutOfRange { rpm: u16, min: u16, max: u16 },
 }
 
