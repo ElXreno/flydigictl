@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use log::{error, info};
+use log::{error, info, warn};
 
 use device::Device;
 use error::{Error, Result};
@@ -68,6 +68,20 @@ struct SetCmd {
 #[argh(subcommand, name = "auto")]
 struct AutoCmd {}
 
+/// Retry until the cooler shows up again; it re-enumerates a couple of seconds
+/// after a power blip.
+fn reopen(path: Option<&std::path::Path>) -> Result<Device> {
+    loop {
+        match Device::open(path) {
+            Ok(dev) => return Ok(dev),
+            Err(Error::NotFound) | Err(Error::Open { .. }) => {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn print_status(status: &protocol::Status) {
     println!(
         "current {:4} rpm   target {:4} rpm   mode {:8}   gear {} (max {})",
@@ -105,10 +119,31 @@ fn run() -> Result<()> {
         Command::Watch(cmd) => {
             let mut seen = 0usize;
             loop {
-                print_status(&dev.read_status(READ_TIMEOUT)?);
-                seen += 1;
-                if cmd.count.is_some_and(|limit| seen >= limit) {
-                    break;
+                match dev.read_status(READ_TIMEOUT) {
+                    Ok(status) => {
+                        print_status(&status);
+                        seen += 1;
+                        if cmd.count.is_some_and(|limit| seen >= limit) {
+                            break;
+                        }
+                    }
+
+                    // The cooler goes quiet whenever it loses power, and the
+                    // Bluetooth link only drops a few seconds later, so a gap
+                    // in the stream is not a reason to give up.
+                    Err(Error::Timeout) => {
+                        warn!("no frames for {}s", READ_TIMEOUT.as_secs());
+                    }
+
+                    // Reconnecting builds a fresh HID device that reuses the
+                    // old name, so the previous descriptor is dead: reopen.
+                    Err(Error::Disconnected) => {
+                        warn!("device went away, waiting");
+                        dev = reopen(args.device.as_deref())?;
+                        info!("reconnected on {}", dev.path.display());
+                    }
+
+                    Err(err) => return Err(err),
                 }
             }
         }

@@ -25,6 +25,9 @@ pub enum Error {
     #[error("timed out waiting for status")]
     Timeout,
 
+    #[error("device went away")]
+    Disconnected,
+
     #[error("rpm {rpm} out of range ({min}-{max})")]
     RpmOutOfRange { rpm: u16, min: u16, max: u16 },
 }
