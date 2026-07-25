@@ -80,7 +80,8 @@ Treat it as a device identifier and keep it out of logs and bug reports.
 
 ## Status notification (`0xEF`)
 
-The device pushes these unprompted, roughly four times a second:
+The device pushes these unprompted, twice a second: 30 frames took 15.0 s to
+arrive, and the interval does not change with fan speed or mode.
 
 ```text
 01 5A A5 EF 0D 68 03 05 6C 07 6C 07 01 01 B4 23 2B 00 ...

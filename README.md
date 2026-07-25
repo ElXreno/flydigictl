@@ -214,9 +214,19 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | Request | Effect |
 |---------|--------|
 | `{"request":"status"}` | speed, mode, and every curve's reading plus which one leads |
+| `{"request":"subscribe"}` | turn the connection into a stream of status updates |
 | `{"request":"get_config"}` | config in force, plus whether it can be saved |
 | `{"request":"set_config","config":{...}}` | replace the config |
 | `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curves |
+
+A subscription is the way to follow the cooler rather than interrogate it: the
+daemon writes a status whenever its picture changes, which is twice a second
+because that is how often the cooler reports itself. Curves are
+still evaluated on `interval_secs`, so the temperatures in those updates move
+at their own slower pace. A cooler that goes away arrives as a status with
+`"connected":false`, which is how a client tells an unplugged cooler from a
+dead daemon. Nothing else is read on that connection, so open a second one for
+requests.
 
 Warnings carry a stable `code` alongside their text, so a client that shows each
 one once can dedupe on that rather than on the message, which names a config
