@@ -207,3 +207,8 @@ Two independent light sources, easy to confuse:
 |--------|---------|---------|-----------|
 | Gear indicators (1-4) | `0x48` | 3 | lit up to the selected gear, or pulsing while in realtime |
 | Side RGB strip (6 LEDs) | `0x46`, content via `0x43`/`0x44`/`0x47` | 4 | plays the palette regardless of fan mode |
+
+Because `0x24` re-applies the buffer, it also restarts the animation from its
+first step - repeating it is a cheap way to resync. `0x23` only raises the
+indicator flag and never touches the strip, so entering realtime leaves the
+animation running undisturbed.
