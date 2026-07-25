@@ -1,16 +1,13 @@
-mod device;
-mod error;
-mod protocol;
+use flydigictl::device;
+use flydigictl::device::Device;
+use flydigictl::error::{Error, Result};
+use flydigictl::protocol::{self, MAX_RPM, MIN_RPM};
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use log::{error, info, warn};
-
-use device::Device;
-use error::{Error, Result};
-use protocol::{MAX_RPM, MIN_RPM};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const LIGHT_GAP: Duration = Duration::from_millis(5);

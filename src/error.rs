@@ -37,6 +37,9 @@ pub enum Error {
     #[error("no effect {mode}, firmware has 1-{max}")]
     UnknownEffect { mode: u8, max: u8 },
 
+    #[error("config: {0}")]
+    Config(String),
+
     #[error("expected on or off, got {0}")]
     BadArgument(String),
 
