@@ -15,7 +15,7 @@ use iced::{Element, Length, Subscription, Theme};
 
 use flydigictl::config::{Config, Point};
 use flydigictl::curve;
-use flydigictl::ipc::{self, Light, Status, Warning};
+use flydigictl::ipc::{self, Light, Status, Warning, WarningCode};
 use flydigictl::protocol::{Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
 
 use client::Client;
@@ -85,6 +85,7 @@ enum Message {
     IndicatorsToggled(bool),
 
     StandbySelected(Standby),
+    DismissNote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +109,13 @@ struct State {
     config: Option<Config>,
     writable: bool,
     selected: usize,
-    /// Last thing worth telling the user, from either side of the socket.
+
+    /// One-off news: a command that failed, or one that worked with a caveat.
+    ///
+    /// Standing conditions do not belong here. A read-only config is true
+    /// whether or not the last click succeeded, so it is drawn from `writable`
+    /// instead - keeping it here meant the next successful command wiped a
+    /// warning that was still true.
     note: Option<String>,
 
     theme: Theme,
@@ -153,11 +160,17 @@ impl State {
     /// Everything but the config goes through here: the reply is either a
     /// warning worth showing or nothing worth saying.
     fn report(&mut self, outcome: Result<Option<Warning>, String>) {
-        match outcome {
-            Ok(Some(Warning { message, .. })) => self.note = Some(message),
-            Ok(None) => self.note = None,
-            Err(err) => self.note = Some(err),
-        }
+        self.note = match outcome {
+            // Already on screen for as long as it holds, so repeating it here
+            // would only push the useful half of the reply out of view.
+            Ok(Some(Warning {
+                code: WarningCode::ConfigReadOnly,
+                ..
+            })) => None,
+            Ok(Some(Warning { message, .. })) => Some(message),
+            Ok(None) => None,
+            Err(err) => Some(err),
+        };
     }
 
     fn reload(&mut self) {
@@ -166,12 +179,6 @@ impl State {
                 self.selected = self.selected.min(config.curves.len().saturating_sub(1));
                 self.config = Some(config);
                 self.writable = writable;
-                if !writable {
-                    self.note = Some(
-                        "The daemon cannot write its config, so changes are live but forgotten on restart"
-                            .to_string(),
-                    );
-                }
             }
             Err(err) => self.note = Some(err),
         }
@@ -409,6 +416,8 @@ fn update(state: &mut State, message: Message) {
             state.report(outcome);
         }
 
+        Message::DismissNote => state.note = None,
+
         Message::StandbySelected(standby) => {
             if let Some(config) = state.config.as_mut() {
                 config.standby = Some(standby);
@@ -441,13 +450,15 @@ fn view(state: &State) -> Element<'_, Message> {
         .spacing(10)
         .padding(12);
 
+    if state.config.is_some() && !state.writable {
+        screen = screen.push(banner(
+            "The daemon cannot save its config: changes apply now and are forgotten on restart",
+            None,
+        ));
+    }
+
     if let Some(note) = &state.note {
-        screen = screen.push(
-            container(text(note.clone()).size(13))
-                .padding(10)
-                .width(Length::Fill)
-                .style(container::bordered_box),
-        );
+        screen = screen.push(banner(note, Some(Message::DismissNote)));
     }
 
     screen.into()
@@ -774,6 +785,24 @@ fn light_pane(state: &State) -> Element<'_, Message> {
         .spacing(10)
         .into(),
     )
+}
+
+fn banner(message: &str, dismiss: Option<Message>) -> Element<'_, Message> {
+    let mut line = row![text(message.to_string()).size(13).width(Length::Fill)].spacing(8);
+
+    if let Some(dismiss) = dismiss {
+        line = line.push(
+            button(text("Dismiss"))
+                .style(button::secondary)
+                .on_press(dismiss),
+        );
+    }
+
+    container(line)
+        .padding(10)
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
 }
 
 fn card(content: Element<'_, Message>) -> Element<'_, Message> {
