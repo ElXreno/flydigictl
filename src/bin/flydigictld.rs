@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
-use flydigictl::config::{Config, ConfigError};
+use flydigictl::config::{Aggregate, Config, ConfigError, Sensor};
 use flydigictl::device::Device;
 use flydigictl::error::Error;
 use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
@@ -47,6 +47,92 @@ enum Event {
 #[derive(Default)]
 struct Shared {
     status: Option<Status>,
+}
+
+/// Configured sensors, resolved to sysfs paths.
+///
+/// Resolution is retried while anything is still missing: a hwmon can show up
+/// after the daemon starts, and giving up once would mean never running the
+/// curve on a machine that was merely slow to load a module.
+struct Sensors {
+    resolved: Vec<(Sensor, Option<PathBuf>)>,
+    aggregate: Aggregate,
+    complained: bool,
+}
+
+impl Sensors {
+    fn resolve(config: &Config) -> Self {
+        let mut sensors = Self {
+            resolved: config
+                .sensors
+                .iter()
+                .map(|sensor| (sensor.clone(), sensor::resolve(sensor)))
+                .collect(),
+            aggregate: config.aggregate,
+            complained: false,
+        };
+        sensors.complain_about_missing();
+        sensors
+    }
+
+    fn describe(sensor: &Sensor) -> String {
+        if sensor.label.is_empty() {
+            format!("{} (first input)", sensor.hwmon)
+        } else {
+            format!("{}/{}", sensor.hwmon, sensor.label)
+        }
+    }
+
+    fn complain_about_missing(&mut self) {
+        let missing: Vec<String> = self
+            .resolved
+            .iter()
+            .filter(|(_, path)| path.is_none())
+            .map(|(sensor, _)| Self::describe(sensor))
+            .collect();
+
+        if missing.is_empty() || self.complained {
+            return;
+        }
+        self.complained = true;
+
+        let available: Vec<String> = sensor::list()
+            .iter()
+            .map(|entry| {
+                if entry.label.is_empty() {
+                    entry.hwmon.clone()
+                } else {
+                    format!("{}/{}", entry.hwmon, entry.label)
+                }
+            })
+            .collect();
+
+        warn!(
+            "no sensor for: {}, retrying. available: {}",
+            missing.join(", "),
+            available.join(", ")
+        );
+    }
+
+    /// Current temperature for the curve, retrying anything unresolved.
+    fn read(&mut self) -> Option<u8> {
+        let mut readings = Vec::new();
+
+        for (sensor, path) in &mut self.resolved {
+            if path.is_none() {
+                *path = sensor::resolve(sensor);
+                if path.is_some() {
+                    info!("sensor {} found", Sensors::describe(sensor));
+                }
+            }
+
+            if let Some(reading) = path.as_deref().and_then(sensor::read) {
+                readings.push(reading);
+            }
+        }
+
+        self.aggregate.apply(&readings)
+    }
 }
 
 fn main() -> ExitCode {
@@ -220,18 +306,7 @@ fn control_loop(
     shared: &Arc<Mutex<Shared>>,
 ) -> Result<(), Error> {
     let mut device: Option<Device> = None;
-    let mut sensor_path = sensor::resolve(&config.sensor);
-    if sensor_path.is_none() {
-        warn!(
-            "sensor {}/{} not found",
-            config.sensor.hwmon,
-            if config.sensor.label.is_empty() {
-                "(first input)"
-            } else {
-                &config.sensor.label
-            }
-        );
-    }
+    let mut sensors = Sensors::resolve(config);
 
     // Tracked so the target is only rewritten when it actually moves, and so a
     // reconnect can restore it: realtime mode does not survive one.
@@ -244,7 +319,7 @@ fn control_loop(
                     if fresh != *config {
                         info!("config reloaded from {}", config_path.display());
                         *config = fresh;
-                        sensor_path = sensor::resolve(&config.sensor);
+                        sensors = Sensors::resolve(config);
                         applied = None;
                     }
                 }
@@ -263,7 +338,7 @@ fn control_loop(
                     Request::SetConfig { config: fresh } => {
                         *config = fresh;
                         config.curve.sort_by_key(|point| point.temp_c);
-                        sensor_path = sensor::resolve(&config.sensor);
+                        sensors = Sensors::resolve(config);
                         applied = None;
                         persist(config, config_path, writable)
                     }
@@ -309,7 +384,7 @@ fn control_loop(
                     continue;
                 };
 
-                let temp = sensor_path.as_deref().and_then(sensor::read);
+                let temp = sensors.read();
                 let mut lost = false;
 
                 match dev.read_status(READ_TIMEOUT) {
