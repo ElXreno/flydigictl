@@ -6,8 +6,14 @@ description = "Control Flydigi BS series laptop coolers on Linux"
 repository = "https://github.com/ElXreno/flydigictl"
 license = "MIT"
 
+[features]
+# The GUI drags in wgpu and a windowing stack, which has no business in a
+# headless install, so the daemon and the CLI stay buildable without it.
+gui = ["dep:iced"]
+
 [dependencies]
 argh = "0.1"
+iced = { version = "0.14", features = ["canvas", "tokio"], optional = true }
 inotify = { version = "0.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,3 +34,8 @@ path = "src/main.rs"
 [[bin]]
 name = "flydigictld"
 path = "src/bin/flydigictld.rs"
+
+[[bin]]
+name = "flydigictl-gui"
+path = "src/bin/gui/main.rs"
+required-features = ["gui"]

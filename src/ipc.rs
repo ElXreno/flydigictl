@@ -15,6 +15,13 @@ pub const DEFAULT_SOCKET: &str = "/run/flydigictl/flydigictl.sock";
 pub enum Request {
     /// Current fan state as the daemon sees it.
     Status,
+    /// Turn this connection into a stream of [`Reply::Status`].
+    ///
+    /// The daemon writes one every time its picture of the cooler changes and
+    /// nothing in between, so a client sees new speeds as fast as the cooler
+    /// reports them without asking for them. No further requests are read on a
+    /// subscribed connection: open a second one for those.
+    Subscribe,
     /// The configuration in force.
     GetConfig,
     /// Replace the configuration.
@@ -61,6 +68,28 @@ pub enum WarningCode {
     ConfigSaveFailed,
     /// The cooler's power supply caps the speed below what was asked for.
     SupplyLimited,
+}
+
+impl Status {
+    /// What subscribers are told while no cooler is attached.
+    ///
+    /// Sent rather than nothing so a client can tell "the cooler is unplugged"
+    /// from "the daemon died", which look identical if silence is the only
+    /// signal.
+    pub fn disconnected() -> Self {
+        Self {
+            model: String::new(),
+            connected: false,
+            temp_c: None,
+            current_rpm: None,
+            target_rpm: None,
+            manual: false,
+            supply: None,
+            supply_max_rpm: None,
+            leading: None,
+            demands: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 
@@ -19,7 +19,16 @@ use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
 use flydigictl::protocol::{self, MAX_RPM, MIN_RPM, STOP_RPM};
 use flydigictl::{sensor, watch};
 
-const READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// The cooler reports itself every 500 ms, so the loop wakes twice as often to
+/// forward what it says without waiting on the next wakeup. Curves are
+/// evaluated on their own, much slower schedule: sensors do not change faster
+/// than the fan can react, but subscribers still want the speed in real time.
+const FRAME_POLL: Duration = Duration::from_millis(250);
+const FRAME_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Silence this long means the cooler is gone rather than merely quiet.
+const SILENCE: Duration = Duration::from_secs(3);
+
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Run a fan curve against a Flydigi BS series cooler
@@ -49,6 +58,30 @@ enum Event {
 #[derive(Default)]
 struct Shared {
     status: Option<Status>,
+    /// One sender per subscribed client. Kept here rather than in the control
+    /// loop so that a client can attach between two updates and still get the
+    /// snapshot it missed.
+    subscribers: Vec<Sender<Status>>,
+}
+
+impl Shared {
+    /// Store a new picture of the cooler and hand it to every subscriber.
+    ///
+    /// Clients that went away are dropped here: a failed send is the only
+    /// notice we get, since nothing tells the daemon a socket was closed.
+    fn publish(&mut self, status: Option<Status>) {
+        // Nothing changed while the cooler stays away, and subscribers do not
+        // need to hear that on every wakeup.
+        if status.is_none() && self.status.is_none() {
+            return;
+        }
+
+        self.status = status.clone();
+
+        let update = status.unwrap_or_else(Status::disconnected);
+        self.subscribers
+            .retain(|subscriber| subscriber.send(update.clone()).is_ok());
+    }
 }
 
 /// One configured curve plus the state needed to run it.
@@ -235,7 +268,7 @@ fn run(config_path: &Path, socket_path: &Path, device: Option<&Path>) -> Result<
         });
     }
 
-    spawn_ticker(tx.clone(), config.interval_secs);
+    spawn_ticker(tx.clone());
 
     let shared = Arc::new(Mutex::new(Shared::default()));
     serve(socket_path, tx, Arc::clone(&shared))?;
@@ -243,15 +276,12 @@ fn run(config_path: &Path, socket_path: &Path, device: Option<&Path>) -> Result<
     control_loop(rx, &mut config, config_path, writable, device, &shared)
 }
 
-fn spawn_ticker(tx: Sender<Event>, mut interval_secs: u64) {
-    if interval_secs == 0 {
-        interval_secs = 1;
-    }
+fn spawn_ticker(tx: Sender<Event>) {
     std::thread::spawn(move || loop {
         if tx.send(Event::Tick).is_err() {
             return;
         }
-        std::thread::sleep(Duration::from_secs(interval_secs));
+        std::thread::sleep(FRAME_POLL);
     });
 }
 
@@ -328,6 +358,13 @@ fn handle_client(stream: UnixStream, tx: Sender<Event>, shared: Arc<Mutex<Shared
             continue;
         }
 
+        // A subscription takes over the connection, so it never comes back
+        // here to read another request.
+        if let Ok(Request::Subscribe) = serde_json::from_str::<Request>(&line) {
+            stream_status(writer, Arc::clone(&shared));
+            return;
+        }
+
         let reply = match serde_json::from_str::<Request>(&line) {
             Err(err) => Reply::Error {
                 message: format!("bad request: {err}"),
@@ -365,6 +402,38 @@ fn handle_client(stream: UnixStream, tx: Sender<Event>, shared: Arc<Mutex<Shared
     }
 }
 
+/// Write updates to a subscribed client until it goes away.
+///
+/// The current snapshot goes out first so a client that connects between two
+/// updates has something to draw immediately rather than an empty window.
+fn stream_status(mut writer: UnixStream, shared: Arc<Mutex<Shared>>) {
+    let (tx, rx) = mpsc::channel();
+
+    let first = {
+        let mut shared = shared.lock().unwrap();
+        shared.subscribers.push(tx);
+        shared.status.clone()
+    };
+
+    let mut write = |status: Status| -> bool {
+        let Ok(mut text) = serde_json::to_string(&Reply::Status(status)) else {
+            return true;
+        };
+        text.push('\n');
+        writer.write_all(text.as_bytes()).is_ok()
+    };
+
+    if !write(first.unwrap_or_else(Status::disconnected)) {
+        return;
+    }
+
+    for status in rx {
+        if !write(status) {
+            return;
+        }
+    }
+}
+
 fn control_loop(
     rx: Receiver<Event>,
     config: &mut Config,
@@ -375,7 +444,14 @@ fn control_loop(
 ) -> Result<(), Error> {
     let mut device: Option<Device> = None;
     let mut curves = Curves::build(config);
-    let interval = config.interval_secs.max(1) as f32;
+
+    // Kept between frames: the curves are evaluated on their own schedule, but
+    // every frame is published and needs something to say about them.
+    let mut demands: Vec<Demand> = Vec::new();
+    let mut leader: Option<Demand> = None;
+    let mut evaluated: Option<Instant> = None;
+    let mut missed = Duration::ZERO;
+    let mut searched: Option<Instant> = None;
 
     // Tracked so the target is only rewritten when it actually moves, and so a
     // reconnect can restore it: realtime mode does not survive one.
@@ -403,6 +479,8 @@ fn control_loop(
             Event::Command(request, reply_tx) => {
                 let reply = match request {
                     Request::Status => unreachable!("served from the snapshot"),
+
+                    Request::Subscribe => unreachable!("kept on the client thread"),
 
                     Request::GetConfig => Reply::Config {
                         config: config.clone(),
@@ -453,8 +531,12 @@ fn control_loop(
             }
 
             Event::Tick => {
-                if device.is_none() {
+                // Polling for frames is cheap, but scanning sysfs for a cooler
+                // that is not there is not worth doing four times a second.
+                if device.is_none() && searched.is_none_or(|last| last.elapsed() >= SILENCE) {
+                    searched = Some(Instant::now());
                     device = Device::open(device_path).ok();
+
                     if let Some(dev) = device.as_mut() {
                         info!("{} on {}", dev.model.name(), dev.path.display());
                         // A fresh connection is back in gear mode.
@@ -478,24 +560,45 @@ fn control_loop(
                 }
 
                 let Some(dev) = device.as_mut() else {
-                    shared.lock().unwrap().status = None;
+                    shared.lock().unwrap().publish(None);
                     continue;
                 };
 
-                let demands = curves.evaluate(interval);
-                let leader = curve::winner(&demands).cloned();
+                let interval = Duration::from_secs(config.interval_secs.max(1));
+                let due = evaluated.is_none_or(|last| last.elapsed() >= interval);
+
+                if due {
+                    let dt = evaluated.map_or(interval, |last| last.elapsed());
+                    demands = curves.evaluate(dt.as_secs_f32());
+                    leader = curve::winner(&demands).cloned();
+                    evaluated = Some(Instant::now());
+                }
+
                 let mut lost = false;
 
-                match dev.read_status(READ_TIMEOUT) {
-                    Err(Error::Disconnected | Error::Timeout) => {
-                        warn!("cooler stopped responding, reopening");
+                match dev.read_status(FRAME_TIMEOUT) {
+                    Err(Error::Disconnected) => {
+                        warn!("cooler went away, reopening");
                         lost = true;
+                    }
+
+                    // A single quiet window means nothing: the cooler speaks
+                    // when it feels like it, and a poll can simply fall between
+                    // two of its frames.
+                    Err(Error::Timeout) => {
+                        missed += FRAME_TIMEOUT;
+                        if missed >= SILENCE {
+                            warn!("cooler stopped responding, reopening");
+                            lost = true;
+                        }
                     }
 
                     Err(err) => warn!("read failed: {err}"),
 
                     Ok(status) => {
-                        if leader.is_none() {
+                        missed = Duration::ZERO;
+
+                        if due && leader.is_none() {
                             debug!("no temperature yet");
                         }
 
@@ -552,7 +655,7 @@ fn control_loop(
                         }
 
                         if !lost {
-                            shared.lock().unwrap().status = Some(Status {
+                            shared.lock().unwrap().publish(Some(Status {
                                 model: dev.model.name().to_string(),
                                 connected: true,
                                 temp_c: leader.as_ref().map(|d| d.temp_c),
@@ -563,7 +666,7 @@ fn control_loop(
                                 supply_max_rpm: supply.map(|supply| supply.max_rpm()),
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 demands: demands.clone(),
-                            });
+                            }));
                         }
                     }
                 }
@@ -571,7 +674,8 @@ fn control_loop(
                 if lost {
                     device = None;
                     applied = None;
-                    shared.lock().unwrap().status = None;
+                    missed = Duration::ZERO;
+                    shared.lock().unwrap().publish(None);
                 }
             }
         }
