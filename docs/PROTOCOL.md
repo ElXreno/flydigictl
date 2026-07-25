@@ -226,7 +226,8 @@ changes state:
 | `02` | sleep after 600 ticks |
 
 A tick is 100 ms - the timer re-arms itself with `0xa0` = 160 units of 625 µs -
-so the delay is one minute.
+so the delay is one minute. Both modes confirmed on hardware: `instant` blanks the
+cooler the moment Bluetooth goes away, `delayed` exactly a minute later.
 
 Sleeping is a firmware state, not just a stopped fan: it also blanks the strip
 and the gear indicators, and on reconnect the cooler wakes up and restores the
