@@ -75,7 +75,7 @@ The device pushes these unprompted, roughly four times a second:
 | 3      | 1    | Command `0xEF`                                               |
 | 4      | 1    | Length (`0x0D` = 13)                                         |
 | 5      | 1    | High nibble: highest allowed gear; low nibble: selected gear |
-| 6      | 1    | Mode: `0x02` gear, `0x03` realtime override                  |
+| 6      | 1    | Mode bits, see below                                         |
 | 7      | 1    | Unknown, `0x05` in every capture                             |
 | 8-9    | 2    | Current fan speed, RPM, little-endian                        |
 | 10-11  | 2    | Target fan speed, RPM, little-endian                         |
@@ -83,8 +83,21 @@ The device pushes these unprompted, roughly four times a second:
 | 14-15  | 2    | Sequence counter, little-endian, wraps                       |
 | 16     | 1    | Checksum                                                     |
 
-The BS2 Pro notes in THRM document the mode byte as `0x04`/`0x05`. A BS3 Pro
-reports `0x02`/`0x03` instead, so treat the value as model-specific.
+The mode byte is a bitfield, not an enum: bit 0 is the realtime override, bit 2
+is instant standby, bit 3 is delayed standby, and bit 1 is always set. Measured
+across every combination:
+
+| Standby | Gear mode | Realtime |
+|---------|-----------|----------|
+| off     | `0x02`    | `0x03`   |
+| instant | `0x06`    | `0x07`   |
+| delayed | `0x0a`    | `0x0b`   |
+
+The BS2 Pro notes in THRM call `0x04`/`0x05` the gear/realtime pair, which is
+the same thing with instant standby enabled rather than anything model
+specific. Comparing the whole byte is a real bug and not a cosmetic one: with
+delayed standby a daemon that expects `0x03` never sees realtime mode, re-sends
+the target on every tick, and pins the cooler in an override it never leaves.
 
 ## Commands
 
@@ -93,7 +106,7 @@ reports `0x02`/`0x03` instead, so treat the value as model-specific.
 | `0x21` | Set realtime RPM    | RPM, little-endian | yes      |
 | `0x23` | Enter realtime mode | none               | yes      |
 | `0x24` | Exit realtime mode  | none               | yes      |
-| `0x26` | Set gear RPM        | gear, RPM LE       | no       |
+| `0x26` | Set gear RPM        | gear, RPM LE       | yes      |
 | `0x41` | Effect upload init  | none               | no       |
 | `0x42` | Effect block write  | data               | no       |
 | `0x43` | Play user buffer    | `01`               | yes      |
@@ -120,10 +133,25 @@ mode: the gear LEDs blink while it is active and return to showing the selected
 gear afterwards. The firmware ramps the fan itself at roughly 60 RPM/s, so a
 new target is reached over several seconds.
 
-Speed limits are enforced by the application, not the firmware. A BS3 Pro is
-rated for 4000 RPM at its top gear, and its four gears are roughly idle, 2700,
-3300 and 4000 RPM. Reaching the top two needs a 9V/3A PD adapter in the side
-USB-C port; powered from a laptop USB port the cooler stays at 2700 RPM.
+A BS3 Pro is rated for 4000 RPM at its top gear. The four gears ship at 1700,
+2400, 3000 and 3700 RPM and each one is rewritable with `0x26`, whose payload is
+a gear index (`00`-`03`, the firmware adds one) followed by a little-endian
+speed. The value is written into the stored table, persisted, and applied right
+away if the currently selected gear is the one being changed:
+
+```text
+02 5A A5 26 05 00 DC 05 0C        quiet gear to 1500 rpm (0x05DC)
+```
+
+Unlike most commands the acknowledgement carries a meaningful status byte: `01`
+if the gear was stored, `00` if the index was out of range.
+
+Gear limits do live in the firmware, contrary to what the vendor app suggests.
+A global holds a supply level of 1, 2 or 3, and `0x26` applies a gear only when
+the level allows it: level 1 permits the two lowest gears, level 2 everything
+but the top one, and level 3 all four. That is the mechanism behind the
+documented "2700 RPM on laptop USB" ceiling, and with a PD adapter in the side
+USB-C port the cooler reports level 3 and accepts the top gear.
 
 Losing power even briefly - a PD renegotiation on a shared GaN charger will do
 it - drops the Bluetooth link and takes the hidraw node with it.
