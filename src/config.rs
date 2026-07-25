@@ -30,6 +30,13 @@ pub struct Config {
 
     /// Hold this speed instead of following the curve.
     pub manual_rpm: Option<u16>,
+
+    /// What the cooler should do on its own when the host goes away.
+    ///
+    /// Applied to the device at startup and stored there, so it keeps working
+    /// after the daemon stops or the machine shuts down. `None` leaves whatever
+    /// the cooler was already set to.
+    pub standby: Option<crate::protocol::Standby>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +90,7 @@ impl Default for Config {
             interval_secs: 3,
             hysteresis_rpm: 100,
             manual_rpm: None,
+            standby: Some(crate::protocol::Standby::Delayed),
         }
     }
 }

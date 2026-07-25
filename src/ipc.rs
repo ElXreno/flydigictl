@@ -33,11 +33,31 @@ pub enum Reply {
     },
     Ok {
         /// Set when a change was applied but could not be written to disk.
-        warning: Option<String>,
+        warning: Option<Warning>,
     },
     Error {
         message: String,
     },
+}
+
+/// A warning carries a stable code alongside its text.
+///
+/// The text names the config path, and on NixOS that path changes on every
+/// rebuild - so a client that wants to show each warning once must dedupe on
+/// `code`, never on `message`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Warning {
+    pub code: WarningCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningCode {
+    /// The config cannot be written: changes are live but not persisted.
+    ConfigReadOnly,
+    /// The config is writable in principle, but saving failed.
+    ConfigSaveFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

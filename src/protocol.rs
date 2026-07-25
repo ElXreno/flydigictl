@@ -20,6 +20,8 @@ pub const CMD_ENTER_REALTIME: u8 = 0x23;
 pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
+pub const CMD_SET_STANDBY: u8 = 0x0D;
+
 pub const CMD_LIGHT_APPLY: u8 = 0x43;
 pub const CMD_LIGHT_SELECT: u8 = 0x45;
 pub const CMD_LIGHT_POWER: u8 = 0x46;
@@ -202,6 +204,60 @@ pub fn enter_realtime() -> [u8; REPORT_LEN] {
 
 pub fn exit_realtime() -> [u8; REPORT_LEN] {
     build_report(CMD_EXIT_REALTIME, &[])
+}
+
+/// What the cooler does when the host disappears.
+///
+/// The firmware handles this itself: on a Bluetooth drop it powers down the fan
+/// and both light sources, and on reconnect it wakes up and restores the gear
+/// it had. Nothing needs to be re-sent, and nothing is written to our config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standby {
+    /// Keep running unattended.
+    Off,
+    /// Sleep as soon as the link drops.
+    Instant,
+    /// Sleep a minute after the link drops (600 ticks of 100 ms).
+    Delayed,
+}
+
+impl Standby {
+    fn code(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Instant => 1,
+            Self::Delayed => 2,
+        }
+    }
+}
+
+impl std::str::FromStr for Standby {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "off" | "never" => Ok(Self::Off),
+            "instant" | "immediate" => Ok(Self::Instant),
+            "delayed" | "delay" => Ok(Self::Delayed),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for Standby {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => write!(f, "off"),
+            Self::Instant => write!(f, "instant"),
+            Self::Delayed => write!(f, "delayed"),
+        }
+    }
+}
+
+/// Persisted in the cooler, so it survives reboots of the host.
+pub fn set_standby(standby: Standby) -> [u8; REPORT_LEN] {
+    build_report(CMD_SET_STANDBY, &[standby.code()])
 }
 
 /// Turn the RGB strip off.
