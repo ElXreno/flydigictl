@@ -31,7 +31,7 @@ $ flydigictl status
 current 1700 rpm   target 1700 rpm   mode gear   gear quiet (max overclock)
 
 $ flydigictl set 2600
-target set to 2600 rpm (firmware ramps at ~60 rpm/s)
+target 2600 rpm
 
 $ flydigictl watch -n 3
 current 1800 rpm   target 2600 rpm   mode realtime   gear quiet (max overclock)
@@ -40,6 +40,12 @@ current 2400 rpm   target 2600 rpm   mode realtime   gear quiet (max overclock)
 
 $ flydigictl auto
 released to gear mode
+
+$ flydigictl sensors
+k10temp                  Tctl         59 C
+amdgpu                   edge         41 C
+nvme                     Composite    33 C
+spd5118                  -            41 C
 ```
 
 `set` holds a fixed speed until you call `auto`, power-cycle the cooler, or
@@ -128,29 +134,66 @@ services.flydigictl = {
   settings = {
     interval_secs = 3;
     hysteresis_rpm = 100;
-    sensor = { hwmon = "k10temp"; label = "Tctl"; };
-    curve = [
-      { temp_c = 45; rpm = 0; }
-      { temp_c = 60; rpm = 1300; }
-      { temp_c = 75; rpm = 2400; }
-      { temp_c = 85; rpm = 3300; }
+    standby = "delayed";
+
+    smoothing = {
+      rise_secs = 10.0;
+      fall_secs = 60.0;
+      panic_c = 90;
+    };
+
+    curves = [
+      {
+        name = "ram";
+        sensor.hwmon = "spd5118";     # both DIMMs, hottest one wins
+        panic_c = 80;
+        points = [
+          { temp_c = 45; rpm = 500; }
+          { temp_c = 55; rpm = 1500; }
+          { temp_c = 65; rpm = 2600; }
+          { temp_c = 75; rpm = 4000; }
+        ];
+      }
+      {
+        name = "cpu";
+        sensor = { hwmon = "k10temp"; label = "Tctl"; };
+        panic_c = 95;
+        points = [
+          { temp_c = 70; rpm = 500; }
+          { temp_c = 85; rpm = 2000; }
+          { temp_c = 95; rpm = 4000; }
+        ];
+      }
     ];
   };
 };
 ```
 
-The module writes `/etc/flydigictl/config.toml`. Speeds are interpolated
-between curve points, `rpm = 0` stops the fan, and the daemon re-applies the
-target whenever the cooler drops back to gear mode - which it does after every
-reconnect.
+The module writes `/etc/flydigictl/config.toml`.
+
+Each curve converts its own sensor into a speed and the highest demand wins.
+That matters because temperatures are not comparable across subsystems: 60 C is
+idle for a CPU and hot for a stick of RAM, so averaging them would let a warm
+drive hide behind a cool processor. `flydigictl sensors` lists what is available
+to point a curve at; an empty `label` matches every input of that hwmon and
+takes the hottest, which covers both DIMMs or both drives in one curve.
+
+Speeds are interpolated between points, `rpm = 0` stops the fan, and the target
+is re-applied whenever the cooler falls back to gear mode, which it does after
+every reconnect.
+
+Readings are smoothed before a curve sees them, with a shorter time constant
+going up than coming down. A CPU can spike thirty degrees and fall back inside
+ten seconds; smoothing the input keeps a real climb responsive while a burst
+barely registers. A raw reading at or above `panic_c` bypasses smoothing, and
+that threshold belongs per curve, since 85 C is a working load for a CPU and
+long past trouble for an SSD.
 
 Because a declarative config lives in the store, it cannot be written to. The
 daemon notices, keeps runtime changes in memory and says so:
 
 ```text
-[WARN ] /etc/flydigictl/config.toml is read-only (a NixOS store path, most
-        likely) - changes made at runtime apply immediately but are lost when
-        the daemon restarts
+[WARN ] /etc/flydigictl/config.toml is read-only, runtime changes are lost on restart
 ```
 
 Outside NixOS the same file is writable and changes are saved. Either way the
@@ -163,15 +206,21 @@ Newline-delimited JSON on `/run/flydigictl/flydigictl.sock`:
 
 ```console
 $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.sock
-{"reply":"status","model":"BS3 Pro","connected":true,"temp_c":47,"current_rpm":1100,"target_rpm":900,"manual":false}
+{"reply":"status","model":"BS3 Pro","connected":true,"temp_c":49,"current_rpm":1100,"target_rpm":2826,
+ "manual":false,"leading":"ram","demands":[{"name":"ram","temp_c":49,"smoothed_c":49,"rpm":2826,"panic":false},
+ {"name":"cpu","temp_c":51,"smoothed_c":51,"rpm":500,"panic":false}]}
 ```
 
 | Request | Effect |
 |---------|--------|
-| `{"request":"status"}` | current temperature, speed and mode |
+| `{"request":"status"}` | speed, mode, and every curve's reading plus which one leads |
 | `{"request":"get_config"}` | config in force, plus whether it can be saved |
 | `{"request":"set_config","config":{...}}` | replace the config |
-| `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curve |
+| `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curves |
+
+Warnings carry a stable `code` alongside their text, so a client that shows each
+one once can dedupe on that rather than on the message, which names a config
+path that changes on every rebuild.
 
 ### Standby
 
