@@ -1,6 +1,7 @@
 //! Fan curve daemon for Flydigi BS series coolers.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -254,16 +255,42 @@ fn spawn_ticker(tx: Sender<Event>, mut interval_secs: u64) {
     });
 }
 
-fn serve(path: &Path, tx: Sender<Event>, shared: Arc<Mutex<Shared>>) -> Result<(), Error> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+/// Take the listener systemd passed us, if it did.
+///
+/// Ownership and permissions of the socket are systemd's business: it creates
+/// it before the daemon starts, which is also how the daemon can drop root and
+/// still hand a usable socket to a desktop client.
+fn inherited_listener() -> Option<UnixListener> {
+    if std::env::var("LISTEN_PID").ok()? != std::process::id().to_string() {
+        return None;
     }
-    let _ = std::fs::remove_file(path);
+    if std::env::var("LISTEN_FDS").ok()? != "1" {
+        warn!("expected exactly one socket from systemd, binding our own");
+        return None;
+    }
 
-    let listener = UnixListener::bind(path).map_err(|source| Error::Open {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    // SAFETY: systemd guarantees fd 3 is the listening socket it created, and
+    // this runs once before anything else touches that descriptor.
+    const SD_LISTEN_FDS_START: RawFd = 3;
+    Some(unsafe { UnixListener::from_raw_fd(SD_LISTEN_FDS_START) })
+}
+
+fn serve(path: &Path, tx: Sender<Event>, shared: Arc<Mutex<Shared>>) -> Result<(), Error> {
+    let listener = match inherited_listener() {
+        Some(listener) => listener,
+        None => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(path);
+
+            UnixListener::bind(path).map_err(|source| Error::Open {
+                path: path.to_path_buf(),
+                source,
+            })?
+        }
+    };
+
     info!("listening on {}", path.display());
 
     std::thread::spawn(move || {

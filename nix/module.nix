@@ -24,6 +24,17 @@ in
   options.services.flydigictl = {
     enable = lib.mkEnableOption "the Flydigi cooler fan curve daemon";
 
+    socketGroup = lib.mkOption {
+      type = lib.types.str;
+      default = "users";
+      description = ''
+        Group allowed to talk to the control socket.
+
+        systemd creates the socket with this group and mode 0660, so a desktop
+        client can reach a daemon that holds no privileges of its own.
+      '';
+    };
+
     settings = lib.mkOption {
       type = format.type;
       default = { };
@@ -31,15 +42,18 @@ in
         {
           interval_secs = 3;
           hysteresis_rpm = 100;
-          sensor = {
-            hwmon = "k10temp";
-            label = "Tctl";
-          };
-          curve = [
-            { temp_c = 45; rpm = 0; }
-            { temp_c = 60; rpm = 1300; }
-            { temp_c = 75; rpm = 2400; }
-            { temp_c = 85; rpm = 3300; }
+          standby = "delayed";
+          curves = [
+            {
+              name = "ram";
+              sensor.hwmon = "spd5118";
+              panic_c = 80;
+              points = [
+                { temp_c = 45; rpm = 500; }
+                { temp_c = 65; rpm = 2600; }
+                { temp_c = 75; rpm = 4000; }
+              ];
+            }
           ];
         }
       '';
@@ -70,30 +84,58 @@ in
       environment.etc."flydigictl/config.toml".source =
         format.generate "flydigictl-config.toml" daemon.settings;
 
+      # The daemon reaches the cooler through this group rather than through
+      # root, which is what lets it run as a dynamic user.
+      users.groups.flydigi = { };
+
+      services.udev.extraRules = ''
+        SUBSYSTEM=="hidraw", KERNELS=="*:37D7:*", GROUP="flydigi", MODE="0660"
+      '';
+
+      systemd.sockets.flydigictld = {
+        description = "Flydigi cooler daemon control socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = "/run/flydigictl/flydigictl.sock";
+          SocketMode = "0660";
+          SocketGroup = daemon.socketGroup;
+          RemoveOnStop = true;
+        };
+      };
+
       systemd.services.flydigictld = {
         description = "Flydigi cooler fan curve daemon";
         wantedBy = [ "multi-user.target" ];
         after = [ "bluetooth.target" ];
 
-        # The cooler comes and goes with its Bluetooth link, so the daemon
-        # waits for it rather than failing at startup.
         serviceConfig = {
-          ExecStart = "${lib.getExe' cfg.package "flydigictld"}";
+          ExecStart = lib.getExe' cfg.package "flydigictld";
           Restart = "on-failure";
           RestartSec = 5;
-          RuntimeDirectory = "flydigictl";
-          RuntimeDirectoryMode = "0755";
+
+          # No account of its own, no home, no privileges beyond the group that
+          # opens the cooler.
+          DynamicUser = true;
+          SupplementaryGroups = [ "flydigi" ];
 
           DevicePolicy = "closed";
           DeviceAllow = [ "char-hidraw rw" ];
           ProtectSystem = "strict";
           ProtectHome = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
           PrivateTmp = true;
           PrivateNetwork = true;
           NoNewPrivileges = true;
           RestrictAddressFamilies = [ "AF_UNIX" ];
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          LockPersonality = true;
           SystemCallFilter = [ "@system-service" ];
+          SystemCallArchitectures = "native";
           MemoryDenyWriteExecute = true;
+          CapabilityBoundingSet = [ "" ];
         };
       };
     })
