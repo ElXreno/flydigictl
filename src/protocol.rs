@@ -24,6 +24,8 @@ pub const CMD_SET_STANDBY: u8 = 0x0D;
 pub const CMD_SET_GEAR_RPM: u8 = 0x26;
 pub const CMD_QUERY_GEAR_TABLE: u8 = 0x27;
 
+pub const CMD_LIGHT_UPLOAD_BEGIN: u8 = 0x41;
+pub const CMD_LIGHT_UPLOAD_BLOCK: u8 = 0x42;
 pub const CMD_LIGHT_APPLY: u8 = 0x43;
 pub const CMD_LIGHT_SELECT: u8 = 0x45;
 pub const CMD_LIGHT_POWER: u8 = 0x46;
@@ -34,9 +36,22 @@ pub const CMD_GEAR_LIGHT: u8 = 0x48;
 /// header, `0x01`-`0x11` carry 10 bytes each and `0x12` carries 6. Higher
 /// indices are acknowledged and then discarded, so there is no point sending
 /// the 30 frames the vendor app uploads.
-const LAST_STEP: usize = 0x12;
-const SHORT_STEP: usize = 6;
 const STEP_LEN: usize = 10;
+
+/// The whole animation, header included: 18 steps of 10 bytes and a final one
+/// of 6. `0x47` addresses these as indices `0x00`-`0x12` and discards anything
+/// above, so the 30 steps the vendor app uploads are mostly thrown away. The
+/// firmware stores exactly this much and flushes it to flash on apply.
+const FULL_BUFFER_LEN: usize = 186;
+
+/// A frame longer than 20 bytes never reaches the firmware.
+///
+/// Measured the same way on `0x42`, `0x47` and `0x27`: a payload of 15 bytes is
+/// answered and 16 is met with silence, so the limit is the frame rather than
+/// any one command. Twenty bytes is what fits in a Bluetooth LE write at the
+/// default ATT MTU, which is also why the 65-byte reports THRM sends are
+/// dropped without a word.
+const MAX_PAYLOAD: usize = 15;
 
 /// Steps that actually drive an LED.
 const LIT_STEPS: [usize; 5] = [2, 5, 8, 11, 14];
@@ -458,25 +473,36 @@ fn preset_buffer(effect: u8) -> [u8; BUFFER_LEN] {
     buf
 }
 
-/// Upload a built-in effect's palette and play it.
-pub fn light_effect(effect: u8) -> Vec<[u8; REPORT_LEN]> {
-    let buf = preset_buffer(effect);
-
+/// Send a whole animation buffer and switch the strip over to it.
+///
+/// `0x47` addresses one 10-byte step per report; `0x41` and `0x42` stream the
+/// same memory instead. The device keeps a write cursor: `0x41` rewinds it and
+/// each `0x42` appends its payload, so the buffer arrives in 10 reports rather
+/// than 19. A block that would run past the end of the buffer is dropped
+/// without an acknowledgement, which surfaces as a missing reply.
+///
+/// `0x43` then copies the buffer to flash behind a `2BGR` magic and selects it,
+/// so the animation survives a power cut.
+fn light_upload(buf: &[u8]) -> Vec<[u8; REPORT_LEN]> {
     let mut reports = vec![
         build_report(CMD_LIGHT_POWER, &[0x01]),
         build_report(CMD_LIGHT_SELECT, &[]),
         build_report(CMD_LIGHT_SELECT, &[0x01]),
+        build_report(CMD_LIGHT_UPLOAD_BEGIN, &[]),
     ];
 
-    for (index, chunk) in buf.chunks(STEP_LEN).enumerate() {
-        reports.push(build_report(
-            CMD_LIGHT_FRAME,
-            &[&[index as u8][..], chunk].concat(),
-        ));
-    }
+    reports.extend(
+        buf.chunks(MAX_PAYLOAD)
+            .map(|chunk| build_report(CMD_LIGHT_UPLOAD_BLOCK, chunk)),
+    );
 
     reports.push(build_report(CMD_LIGHT_APPLY, &[0x01]));
     reports
+}
+
+/// Upload a built-in effect's palette and play it.
+pub fn light_effect(effect: u8) -> Vec<[u8; REPORT_LEN]> {
+    light_upload(&preset_buffer(effect))
 }
 
 /// Toggle the gear indicator LEDs. Unlike the strip, this is a normal
@@ -510,13 +536,9 @@ impl Rgb {
 /// header step followed by 30 animation steps, and nothing shows until the
 /// final apply switches the strip over to the buffer.
 pub fn light_static(color: Rgb, brightness: u8) -> Vec<[u8; REPORT_LEN]> {
-    let mut reports = vec![
-        build_report(CMD_LIGHT_POWER, &[0x01]),
-        build_report(CMD_LIGHT_SELECT, &[]),
-        build_report(CMD_LIGHT_SELECT, &[0x01]),
-    ];
+    let mut buf = [0u8; FULL_BUFFER_LEN];
 
-    let header = [
+    buf[..STEP_LEN].copy_from_slice(&[
         0x00,
         0x02,
         0x00,
@@ -527,33 +549,17 @@ pub fn light_static(color: Rgb, brightness: u8) -> Vec<[u8; REPORT_LEN]> {
         color.g,
         color.b,
         0x00,
-    ];
-    reports.push(build_report(
-        CMD_LIGHT_FRAME,
-        &[&[0x00][..], &header[..]].concat(),
-    ));
+    ]);
 
     let lit = color.scaled(brightness);
-    for index in 1..=LAST_STEP {
-        let mut data = [0u8; STEP_LEN];
-        if LIT_STEPS.contains(&(index - 1)) {
-            data[6] = lit.r;
-            data[7] = lit.g;
-            data[8] = lit.b;
-        }
-        let len = if index == LAST_STEP {
-            SHORT_STEP
-        } else {
-            STEP_LEN
-        };
-        reports.push(build_report(
-            CMD_LIGHT_FRAME,
-            &[&[index as u8][..], &data[..len]].concat(),
-        ));
+    for step in LIT_STEPS {
+        let at = (step + 1) * STEP_LEN;
+        buf[at + 6] = lit.r;
+        buf[at + 7] = lit.g;
+        buf[at + 8] = lit.b;
     }
 
-    reports.push(build_report(CMD_LIGHT_APPLY, &[0x01]));
-    reports
+    light_upload(&buf)
 }
 
 const LIGHT_SPEED_MEDIUM: u8 = 0x0A;
