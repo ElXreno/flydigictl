@@ -18,8 +18,12 @@ pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
 /// Firmware clamps neither end, so the app has to.
+///
+/// 4000 RPM is the rated ceiling of a BS3 Pro (and a BS2 Pro). Reaching it also
+/// needs a 9V/3A PD adapter in the side USB-C port - powered from a laptop USB
+/// port the cooler stays at its level 2 gear, 2700 RPM.
 pub const MIN_RPM: u16 = 800;
-pub const MAX_RPM: u16 = 4500;
+pub const MAX_RPM: u16 = 4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
