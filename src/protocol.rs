@@ -8,6 +8,9 @@ pub const VID: u16 = 0x37D7;
 
 pub const REPORT_ID_IN: u8 = 0x01;
 pub const REPORT_ID_OUT: u8 = 0x02;
+
+/// Every report is 25 bytes, lighting included. THRM pads lighting reports to
+/// 65 bytes, which a BS3 Pro ignores without so much as an error.
 pub const REPORT_LEN: usize = 25;
 
 const MAGIC: [u8; 2] = [0x5A, 0xA5];
@@ -16,6 +19,11 @@ pub const CMD_SET_REALTIME_RPM: u8 = 0x21;
 pub const CMD_ENTER_REALTIME: u8 = 0x23;
 pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
+
+pub const CMD_LIGHT_SMART_TEMP: u8 = 0x44;
+pub const CMD_LIGHT_SELECT: u8 = 0x45;
+pub const CMD_LIGHT_POWER: u8 = 0x46;
+pub const CMD_GEAR_LIGHT: u8 = 0x48;
 
 /// Firmware clamps neither end, so the app has to.
 ///
@@ -184,23 +192,70 @@ pub fn exit_realtime() -> [u8; REPORT_LEN] {
     build_report(CMD_EXIT_REALTIME, &[])
 }
 
-/// Parse a status notification. Returns `None` for other frames, malformed
-/// frames, or a checksum mismatch.
-pub fn parse_status(buf: &[u8]) -> Option<Status> {
-    if buf.len() < 17 || buf[0] != REPORT_ID_IN || buf[1..3] != MAGIC {
-        return None;
-    }
-    if buf[3] != CMD_STATUS_NOTIFY {
+/// Turn the RGB strip off.
+pub fn light_off() -> [u8; REPORT_LEN] {
+    build_report(CMD_LIGHT_POWER, &[0x00])
+}
+
+/// Hand the strip back to the firmware's temperature-driven effect.
+///
+/// The leading writes select the strip; their individual meaning is unknown,
+/// they are replayed as a unit. The temperature comes from the cooler's own
+/// sensor - there is no command for the host to feed one in.
+///
+/// Deliberately no `0x43` at the end: that swaps the strip over to
+/// the uploaded animation buffer, which is empty here, so the effect would
+/// light up for an instant and die.
+pub fn light_smart_temp() -> Vec<[u8; REPORT_LEN]> {
+    vec![
+        build_report(CMD_LIGHT_POWER, &[0x01]),
+        build_report(CMD_LIGHT_SELECT, &[]),
+        build_report(CMD_LIGHT_SELECT, &[0x01]),
+        build_report(CMD_LIGHT_SMART_TEMP, &[0x01]),
+    ]
+}
+
+/// Toggle the gear indicator LEDs. Unlike the strip, this is a normal
+/// 25-byte control report.
+pub fn gear_light(on: bool) -> [u8; REPORT_LEN] {
+    build_report(CMD_GEAR_LIGHT, &[u8::from(on)])
+}
+
+/// A frame the device sent us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame<'a> {
+    pub cmd: u8,
+    pub payload: &'a [u8],
+}
+
+/// Validate an incoming report and split out its command and payload.
+/// Returns `None` for malformed frames and checksum mismatches.
+pub fn parse_frame(buf: &[u8]) -> Option<Frame<'_>> {
+    if buf.len() < 6 || buf[0] != REPORT_ID_IN || buf[1..3] != MAGIC {
         return None;
     }
 
-    let len = buf[4] as usize;
-    let payload_len = len.checked_sub(2)?;
+    let cmd = buf[3];
+    let payload_len = (buf[4] as usize).checked_sub(2)?;
     let payload = buf.get(5..5 + payload_len)?;
-    if *buf.get(5 + payload_len)? != checksum(CMD_STATUS_NOTIFY, payload) {
+    if *buf.get(5 + payload_len)? != checksum(cmd, payload) {
         return None;
     }
-    if payload_len < 11 {
+
+    Some(Frame { cmd, payload })
+}
+
+/// Commands are acknowledged by echoing the command back with a status byte.
+/// Every acknowledgement observed so far carries `0x01`.
+pub fn parse_ack(buf: &[u8]) -> Option<Frame<'_>> {
+    let frame = parse_frame(buf)?;
+    (frame.cmd != CMD_STATUS_NOTIFY).then_some(frame)
+}
+
+/// Parse a status notification. Returns `None` for any other frame.
+pub fn parse_status(buf: &[u8]) -> Option<Status> {
+    let Frame { cmd, payload } = parse_frame(buf)?;
+    if cmd != CMD_STATUS_NOTIFY || payload.len() < 11 {
         return None;
     }
 
@@ -233,6 +288,23 @@ mod tests {
         assert_eq!(status.max_gear, Gear::Overclock);
         assert_eq!(status.gear, Gear::Quiet);
         assert_eq!(status.seq, 0x23B4);
+    }
+
+    #[test]
+    fn parses_captured_ack() {
+        // Reply to `light off`, captured from a BS3 Pro.
+        let raw = [
+            0x01, 0x5A, 0xA5, 0x46, 0x03, 0x01, 0x4A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let ack = parse_ack(&raw).expect("ack should parse");
+        assert_eq!(ack.cmd, CMD_LIGHT_POWER);
+        assert_eq!(ack.payload, &[0x01]);
+    }
+
+    #[test]
+    fn telemetry_is_not_an_ack() {
+        assert!(parse_ack(&SAMPLE).is_none());
     }
 
     #[test]
