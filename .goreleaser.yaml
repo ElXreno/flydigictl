@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - builder: rust
+    tool: cargo
+    command: build
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+
+archives:
+  - formats:
+      - tar.gz
+
+nfpms:
+  - package_name: flydigictl
+    description: Control Flydigi BS series laptop coolers on Linux
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: nix/70-flydigi-cooler.rules
+        dst: /usr/lib/udev/rules.d/70-flydigi-cooler.rules
+
+changelog:
+  disable: true
+
+release:
+  use_existing_draft: true
