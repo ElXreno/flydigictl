@@ -172,3 +172,18 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | `{"request":"get_config"}` | config in force, plus whether it can be saved |
 | `{"request":"set_config","config":{...}}` | replace the config |
 | `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curve |
+
+### Standby
+
+```console
+$ flydigictl standby delayed
+standby delayed
+```
+
+`off`, `instant` and `delayed` decide what the cooler does when the host goes
+away - shutting the laptop down, for instance. This is the firmware's own
+feature: it stops the fan, blanks both light sources and wakes back up with the
+gear it had when the host returns. The setting is stored in the cooler, so it
+keeps working with the daemon stopped.
+
+The daemon re-applies `standby` from the config whenever it connects.

@@ -13,7 +13,7 @@ use log::{debug, error, info, warn};
 use flydigictl::config::{Config, ConfigError};
 use flydigictl::device::Device;
 use flydigictl::error::Error;
-use flydigictl::ipc::{self, Reply, Request, Status};
+use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
 use flydigictl::protocol::{self, MAX_RPM, MIN_RPM, STOP_RPM};
 use flydigictl::{sensor, watch};
 
@@ -288,10 +288,19 @@ fn control_loop(
             Event::Tick => {
                 if device.is_none() {
                     device = Device::open(device_path).ok();
-                    if let Some(dev) = &device {
+                    if let Some(dev) = device.as_mut() {
                         info!("{} on {}", dev.model.name(), dev.path.display());
                         // A fresh connection is back in gear mode.
                         applied = None;
+
+                        // Re-assert standby on every connection: it is stored in
+                        // the cooler, but the cooler is what we just met.
+                        if let Some(standby) = config.standby {
+                            match dev.send_acked(protocol::set_standby(standby), ACK_TIMEOUT) {
+                                Ok(_) => info!("standby set to {standby}"),
+                                Err(err) => warn!("cannot set standby: {err}"),
+                            }
+                        }
                     }
                 }
 
@@ -373,17 +382,23 @@ fn apply(dev: &mut Device, rpm: u16) -> Result<(), Error> {
 fn persist(config: &Config, path: &Path, writable: bool) -> Reply {
     if !writable {
         return Reply::Ok {
-            warning: Some(format!(
-                "{} is read-only, change not saved",
-                path.display()
-            )),
+            warning: Some(Warning {
+                code: WarningCode::ConfigReadOnly,
+                message: format!(
+                    "{} is read-only, change not saved",
+                    path.display()
+                ),
+            }),
         };
     }
 
     match config.save(path) {
         Ok(()) => Reply::Ok { warning: None },
         Err(err) => Reply::Ok {
-            warning: Some(format!("change applied but not saved: {err}")),
+            warning: Some(Warning {
+                code: WarningCode::ConfigSaveFailed,
+                message: format!("change applied but not saved: {err}"),
+            }),
         },
     }
 }

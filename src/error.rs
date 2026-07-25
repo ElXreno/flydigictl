@@ -40,7 +40,7 @@ pub enum Error {
     #[error("config: {0}")]
     Config(String),
 
-    #[error("expected on or off, got {0}")]
+    #[error("unexpected value: {0}")]
     BadArgument(String),
 
     #[error("command 0x{cmd:02x} not acknowledged")]

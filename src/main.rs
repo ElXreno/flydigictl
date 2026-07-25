@@ -32,6 +32,7 @@ enum Command {
     Watch(WatchCmd),
     Set(SetCmd),
     Auto(AutoCmd),
+    Standby(StandbyCmd),
     Light(LightCmd),
 }
 
@@ -67,6 +68,15 @@ struct SetCmd {
 #[derive(argh::FromArgs)]
 #[argh(subcommand, name = "auto")]
 struct AutoCmd {}
+
+/// choose what the cooler does when the host disconnects
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "standby")]
+struct StandbyCmd {
+    /// off, instant, or delayed (a minute after the link drops)
+    #[argh(positional)]
+    mode: String,
+}
 
 /// control the lighting
 #[derive(argh::FromArgs)]
@@ -245,6 +255,20 @@ fn run() -> Result<()> {
         Command::Auto(_) => {
             dev.send_acked(protocol::exit_realtime(), ACK_TIMEOUT)?;
             info!("released to gear mode");
+        }
+
+        Command::Standby(cmd) => {
+            let mode: protocol::Standby = cmd
+                .mode
+                .parse()
+                .map_err(|()| Error::BadArgument(cmd.mode.clone()))?;
+
+            dev.send_acked(protocol::set_standby(mode), ACK_TIMEOUT)?;
+            match mode {
+                protocol::Standby::Off => info!("standby off"),
+                protocol::Standby::Instant => info!("standby instant"),
+                protocol::Standby::Delayed => info!("standby delayed"),
+            }
         }
 
         Command::Light(cmd) => match cmd.what {

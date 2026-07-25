@@ -212,3 +212,27 @@ Because `0x24` re-applies the buffer, it also restarts the animation from its
 first step - repeating it is a cheap way to resync. `0x23` only raises the
 indicator flag and never touches the strip, so entering realtime leaves the
 animation running undisturbed.
+
+## Standby (`0x0D`)
+
+The cooler can look after itself when the host disappears. `0x0D` writes
+setting 2, and `FUN_ram_00006ae2` acts on it whenever the Bluetooth link
+changes state:
+
+| Payload | On disconnect |
+|---------|---------------|
+| `00` | keep running |
+| `01` | sleep immediately |
+| `02` | sleep after 600 ticks |
+
+A tick is 100 ms - the timer re-arms itself with `0xa0` = 160 units of 625 µs -
+so the delay is one minute.
+
+Sleeping is a firmware state, not just a stopped fan: it also blanks the strip
+and the gear indicators, and on reconnect the cooler wakes up and restores the
+gear it had stored. The setting itself lives in the cooler, so it survives a
+host reboot and needs no re-sending, though re-asserting it on connect is
+harmless.
+
+`0x0C` is the neighbouring switch for starting up automatically when power is
+applied.
