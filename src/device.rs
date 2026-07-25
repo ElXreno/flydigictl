@@ -122,12 +122,27 @@ impl Device {
             match poll(&mut fds, timeout) {
                 Ok(0) => return Err(Error::Timeout),
                 Ok(_) => {}
-                // The Go runtime's preemption signals taught us to expect this.
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(errno) => return Err(Error::Poll(errno)),
             }
 
-            let n = self.file.read(&mut buf).map_err(Error::Read)?;
+            // A cooler that loses power mid-session (a PD renegotiation is
+            // enough) drops its Bluetooth link and takes the hidraw node with
+            // it. Say so instead of blaming the timeout.
+            let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+            if revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+                return Err(Error::Disconnected);
+            }
+
+            let n = match self.file.read(&mut buf) {
+                Ok(0) => return Err(Error::Disconnected),
+                Ok(n) => n,
+                Err(err) if err.raw_os_error() == Some(nix::libc::ENODEV) => {
+                    return Err(Error::Disconnected)
+                }
+                Err(err) => return Err(Error::Read(err)),
+            };
+
             if let Some(status) = protocol::parse_status(&buf[..n]) {
                 return Ok(status);
             }

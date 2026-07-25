@@ -93,5 +93,11 @@ mode: the gear LEDs blink while it is active and return to showing the selected
 gear afterwards. The firmware ramps the fan itself at roughly 60 RPM/s, so a
 new target is reached over several seconds.
 
-Speed limits are enforced by the application, not the firmware: THRM uses
-800–4500 RPM, with factory gear presets from 1300 (`静音低`) to 4000 (`超频高`).
+Speed limits are enforced by the application, not the firmware. A BS3 Pro is
+rated for 4000 RPM at its top gear, and its four gears are roughly idle, 2700,
+3300 and 4000 RPM. Reaching the top two needs a 9V/3A PD adapter in the side
+USB-C port; powered from a laptop USB port the cooler stays at 2700 RPM.
+
+Losing power even briefly - a PD renegotiation on a shared GaN charger will do
+it - resets the cooler to its first gear and drops the Bluetooth link, taking
+the hidraw node with it until it reconnects.
