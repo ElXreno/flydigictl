@@ -116,3 +116,59 @@ set.
 ## License
 
 MIT
+
+## Daemon
+
+`flydigictld` runs a fan curve against the cooler and exposes a socket for
+other tools.
+
+```nix
+services.flydigictl = {
+  enable = true;
+  settings = {
+    interval_secs = 3;
+    hysteresis_rpm = 100;
+    sensor = { hwmon = "k10temp"; label = "Tctl"; };
+    curve = [
+      { temp_c = 45; rpm = 0; }
+      { temp_c = 60; rpm = 1300; }
+      { temp_c = 75; rpm = 2400; }
+      { temp_c = 85; rpm = 3300; }
+    ];
+  };
+};
+```
+
+The module writes `/etc/flydigictl/config.toml`. Speeds are interpolated
+between curve points, `rpm = 0` stops the fan, and the daemon re-applies the
+target whenever the cooler drops back to gear mode - which it does after every
+reconnect.
+
+Because a declarative config lives in the store, it cannot be written to. The
+daemon notices, keeps runtime changes in memory and says so:
+
+```text
+[WARN ] /etc/flydigictl/config.toml is read-only (a NixOS store path, most
+        likely) - changes made at runtime apply immediately but are lost when
+        the daemon restarts
+```
+
+Outside NixOS the same file is writable and changes are saved. Either way the
+config is reloaded live: the daemon watches the *directory*, so replacing the
+symlink during `nixos-rebuild switch` is picked up, as is a plain editor save.
+
+### Socket
+
+Newline-delimited JSON on `/run/flydigictl/flydigictl.sock`:
+
+```console
+$ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.sock
+{"reply":"status","model":"BS3 Pro","connected":true,"temp_c":47,"current_rpm":1100,"target_rpm":900,"manual":false}
+```
+
+| Request | Effect |
+|---------|--------|
+| `{"request":"status"}` | current temperature, speed and mode |
+| `{"request":"get_config"}` | config in force, plus whether it can be saved |
+| `{"request":"set_config","config":{...}}` | replace the config |
+| `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curve |
