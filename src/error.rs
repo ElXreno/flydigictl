@@ -43,6 +43,9 @@ pub enum Error {
 
     #[error("command 0x{cmd:02x} not acknowledged")]
     NoAck { cmd: u8 },
+
+    #[error("cooler refused gear {gear}, the power supply may be too weak for it")]
+    GearRejected { gear: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

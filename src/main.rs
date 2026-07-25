@@ -34,6 +34,7 @@ enum Command {
     Auto(AutoCmd),
     Standby(StandbyCmd),
     Sensors(SensorsCmd),
+    Gear(GearCmd),
     Light(LightCmd),
 }
 
@@ -69,6 +70,33 @@ struct SetCmd {
 #[derive(argh::FromArgs)]
 #[argh(subcommand, name = "auto")]
 struct AutoCmd {}
+
+/// show the speeds stored for each gear, or change one
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "gear")]
+struct GearCmd {
+    #[argh(subcommand)]
+    what: Option<GearWhat>,
+}
+
+#[derive(argh::FromArgs)]
+#[argh(subcommand)]
+enum GearWhat {
+    Set(GearSetCmd),
+}
+
+/// store a speed for one gear
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "set")]
+struct GearSetCmd {
+    /// quiet, standard, strong or overclock
+    #[argh(positional)]
+    gear: String,
+
+    /// speed in RPM
+    #[argh(positional)]
+    rpm: u16,
+}
 
 /// list temperature sensors the daemon could use
 #[derive(argh::FromArgs)]
@@ -281,6 +309,44 @@ fn run() -> Result<()> {
             dev.send_acked(protocol::exit_realtime(), ACK_TIMEOUT)?;
             info!("released to gear mode");
         }
+
+        Command::Gear(cmd) => match cmd.what {
+            Some(GearWhat::Set(cmd)) => {
+                let gear: protocol::Gear = cmd
+                    .gear
+                    .parse()
+                    .map_err(|()| Error::BadArgument(cmd.gear.clone()))?;
+
+                if !(MIN_RPM..=MAX_RPM).contains(&cmd.rpm) {
+                    return Err(Error::RpmOutOfRange {
+                        rpm: cmd.rpm,
+                        min: MIN_RPM,
+                        max: MAX_RPM,
+                    });
+                }
+
+                let report = protocol::set_gear_rpm(gear, cmd.rpm)
+                    .ok_or_else(|| Error::BadArgument(cmd.gear.clone()))?;
+
+                // The firmware refuses gears the supply cannot carry and says
+                // so in the acknowledgement instead of failing silently.
+                if dev.send_acked(report, ACK_TIMEOUT)? == 0 {
+                    return Err(Error::GearRejected { gear: cmd.gear });
+                }
+                info!("gear {gear} stored at {} rpm", cmd.rpm);
+            }
+
+            None => {
+                let payload = dev.query(protocol::query_gear_table(), ACK_TIMEOUT)?;
+                let table = protocol::parse_gear_table(&payload).ok_or(Error::NoAck {
+                    cmd: protocol::CMD_QUERY_GEAR_TABLE,
+                })?;
+
+                for (gear, rpm) in protocol::Gear::ALL.iter().zip(table) {
+                    println!("{:<10} {rpm:4} rpm", gear.to_string());
+                }
+            }
+        },
 
         Command::Standby(cmd) => {
             let mode: protocol::Standby = cmd

@@ -128,6 +128,26 @@ impl Device {
         })
     }
 
+    /// Send a query and return the payload it answers with.
+    pub fn query(
+        &mut self,
+        report: [u8; protocol::REPORT_LEN],
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let cmd = report[3];
+        self.send(report)?;
+
+        self.read_matching(timeout, |buf| {
+            protocol::parse_ack(buf)
+                .filter(|ack| ack.cmd == cmd)
+                .map(|ack| ack.payload.to_vec())
+        })
+        .map_err(|err| match err {
+            Error::Timeout => Error::NoAck { cmd },
+            other => other,
+        })
+    }
+
     /// Wait for the next status notification, ignoring unrelated frames.
     pub fn read_status(&mut self, timeout: Duration) -> Result<Status> {
         self.read_matching(timeout, protocol::parse_status)

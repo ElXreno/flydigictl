@@ -21,6 +21,8 @@ pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
 pub const CMD_SET_STANDBY: u8 = 0x0D;
+pub const CMD_SET_GEAR_RPM: u8 = 0x26;
+pub const CMD_QUERY_GEAR_TABLE: u8 = 0x27;
 
 pub const CMD_LIGHT_APPLY: u8 = 0x43;
 pub const CMD_LIGHT_SELECT: u8 = 0x45;
@@ -170,6 +172,67 @@ impl std::fmt::Display for Gear {
             Self::Unknown(n) => write!(f, "unknown(0x{n:x})"),
         }
     }
+}
+
+impl Gear {
+    /// The four gears in the order the device stores and cycles them.
+    pub const ALL: [Self; 4] = [Self::Quiet, Self::Standard, Self::Strong, Self::Overclock];
+
+    /// Index into the stored speed table.
+    fn slot(self) -> Option<u8> {
+        match self {
+            Self::Quiet => Some(0),
+            Self::Standard => Some(1),
+            Self::Strong => Some(2),
+            Self::Overclock => Some(3),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+impl std::str::FromStr for Gear {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "quiet" => Ok(Self::Quiet),
+            "standard" => Ok(Self::Standard),
+            "strong" => Ok(Self::Strong),
+            "overclock" => Ok(Self::Overclock),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Ask for the four stored gear speeds.
+pub fn query_gear_table() -> [u8; REPORT_LEN] {
+    build_report(CMD_QUERY_GEAR_TABLE, &[])
+}
+
+/// Four little-endian speeds, in [`Gear::ALL`] order.
+pub fn parse_gear_table(payload: &[u8]) -> Option<[u16; 4]> {
+    if payload.len() < 8 {
+        return None;
+    }
+    Some([
+        u16::from_le_bytes([payload[0], payload[1]]),
+        u16::from_le_bytes([payload[2], payload[3]]),
+        u16::from_le_bytes([payload[4], payload[5]]),
+        u16::from_le_bytes([payload[6], payload[7]]),
+    ])
+}
+
+/// Store a speed for one gear.
+///
+/// Unlike a realtime target this is written into the cooler and survives
+/// reconnects, so it also changes what the physical button cycles through. The
+/// firmware only applies the gear right away if the supply allows it: on weak
+/// power it refuses the top gears, which is where the "2700 rpm on laptop USB"
+/// limit actually comes from.
+pub fn set_gear_rpm(gear: Gear, rpm: u16) -> Option<[u8; REPORT_LEN]> {
+    let slot = gear.slot()?;
+    let [lo, hi] = rpm.to_le_bytes();
+    Some(build_report(CMD_SET_GEAR_RPM, &[slot, lo, hi]))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
