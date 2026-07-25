@@ -20,10 +20,17 @@ pub const CMD_ENTER_REALTIME: u8 = 0x23;
 pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
+pub const CMD_LIGHT_APPLY: u8 = 0x43;
 pub const CMD_LIGHT_SMART_TEMP: u8 = 0x44;
 pub const CMD_LIGHT_SELECT: u8 = 0x45;
 pub const CMD_LIGHT_POWER: u8 = 0x46;
+pub const CMD_LIGHT_FRAME: u8 = 0x47;
 pub const CMD_GEAR_LIGHT: u8 = 0x48;
+
+/// The strip plays a 30-step animation; only every third step drives an LED.
+const ANIMATION_STEPS: usize = 30;
+const LIT_STEPS: [usize; 5] = [2, 5, 8, 11, 14];
+const STEP_LEN: usize = 10;
 
 /// Firmware clamps neither end, so the app has to.
 ///
@@ -220,6 +227,74 @@ pub fn light_smart_temp() -> Vec<[u8; REPORT_LEN]> {
 pub fn gear_light(on: bool) -> [u8; REPORT_LEN] {
     build_report(CMD_GEAR_LIGHT, &[u8::from(on)])
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    fn scaled(self, brightness: u8) -> Self {
+        let factor = f32::from(brightness.min(100)) / 100.0;
+        Self {
+            r: (f32::from(self.r) * factor) as u8,
+            g: (f32::from(self.g) * factor) as u8,
+            b: (f32::from(self.b) * factor) as u8,
+        }
+    }
+}
+
+/// Paint the strip a single colour.
+///
+/// The strip renders an animation held in device memory, so a static colour is
+/// an animation whose lit steps all carry the same colour. The upload is a
+/// header step followed by 30 animation steps, and nothing shows until the
+/// final apply switches the strip over to the buffer.
+pub fn light_static(color: Rgb, brightness: u8) -> Vec<[u8; REPORT_LEN]> {
+    let mut reports = vec![
+        build_report(CMD_LIGHT_POWER, &[0x01]),
+        build_report(CMD_LIGHT_SELECT, &[]),
+        build_report(CMD_LIGHT_SELECT, &[0x01]),
+    ];
+
+    let header = [
+        0x00,
+        0x02,
+        0x00,
+        0x00,
+        LIGHT_SPEED_MEDIUM,
+        brightness.min(100),
+        color.r,
+        color.g,
+        color.b,
+        0x00,
+    ];
+    reports.push(build_report(
+        CMD_LIGHT_FRAME,
+        &[&[0x00][..], &header[..]].concat(),
+    ));
+
+    let lit = color.scaled(brightness);
+    for step in 0..ANIMATION_STEPS {
+        let mut data = [0u8; STEP_LEN];
+        if LIT_STEPS.contains(&step) {
+            data[6] = lit.r;
+            data[7] = lit.g;
+            data[8] = lit.b;
+        }
+        reports.push(build_report(
+            CMD_LIGHT_FRAME,
+            &[&[(step + 1) as u8][..], &data[..]].concat(),
+        ));
+    }
+
+    reports.push(build_report(CMD_LIGHT_APPLY, &[0x01]));
+    reports
+}
+
+const LIGHT_SPEED_MEDIUM: u8 = 0x0A;
 
 /// A frame the device sent us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -84,7 +84,21 @@ struct LightCmd {
 enum LightWhat {
     Off(LightOffCmd),
     Temp(LightTempCmd),
+    Static(LightStaticCmd),
     Gear(LightGearCmd),
+}
+
+/// paint the strip a single colour
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "static")]
+struct LightStaticCmd {
+    /// colour as rrggbb, with or without a leading #
+    #[argh(positional)]
+    color: String,
+
+    /// brightness percentage, 0-100 (default: 100)
+    #[argh(option, short = 'b', default = "100")]
+    brightness: u8,
 }
 
 /// turn the RGB strip off
@@ -118,6 +132,23 @@ fn reopen(path: Option<&std::path::Path>) -> Result<Device> {
             Err(err) => return Err(err),
         }
     }
+}
+
+fn parse_color(text: &str) -> Result<protocol::Rgb> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if hex.len() != 6 {
+        return Err(Error::BadColor(text.to_string()));
+    }
+
+    let byte = |range: std::ops::Range<usize>| {
+        u8::from_str_radix(&hex[range], 16).map_err(|_| Error::BadColor(text.to_string()))
+    };
+
+    Ok(protocol::Rgb {
+        r: byte(0..2)?,
+        g: byte(2..4)?,
+        b: byte(4..6)?,
+    })
 }
 
 fn print_status(status: &protocol::Status) {
@@ -227,6 +258,18 @@ fn run() -> Result<()> {
                     std::thread::sleep(LIGHT_GAP);
                 }
                 info!("strip on temperature effect");
+            }
+
+            LightWhat::Static(cmd) => {
+                let color = parse_color(&cmd.color)?;
+                for report in protocol::light_static(color, cmd.brightness) {
+                    dev.send_acked(report, ACK_TIMEOUT)?;
+                    std::thread::sleep(LIGHT_GAP);
+                }
+                info!(
+                    "colour #{:02x}{:02x}{:02x} at {}%",
+                    color.r, color.g, color.b, cmd.brightness
+                );
             }
 
             LightWhat::Gear(gear) => {
