@@ -37,10 +37,7 @@ pub fn spawn(path: &Path, tx: Sender<()>) {
             | WatchMask::ATTRIB;
 
         if let Err(err) = inotify.watches().add(&dir, mask) {
-            warn!(
-                "cannot watch {}, live reload off: {err}",
-                dir.display()
-            );
+            warn!("cannot watch {}, live reload off: {err}", dir.display());
             return;
         }
 

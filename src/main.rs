@@ -273,10 +273,7 @@ fn run() -> Result<()> {
             if stopping {
                 info!("fan stopped");
             } else {
-                info!(
-                    "target {} rpm",
-                    cmd.rpm
-                );
+                info!("target {} rpm", cmd.rpm);
             }
         }
 

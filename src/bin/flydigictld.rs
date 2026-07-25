@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
-use flydigictl::config::{Aggregate, Config, ConfigError, Sensor};
+use flydigictl::config::{Config, ConfigError, Point, Sensor, Smoothing};
+use flydigictl::curve::{self, Demand, Smoothed};
 use flydigictl::device::Device;
 use flydigictl::error::Error;
 use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
@@ -49,46 +50,55 @@ struct Shared {
     status: Option<Status>,
 }
 
-/// Configured sensors, resolved to sysfs paths.
-///
-/// Resolution is retried while anything is still missing: a hwmon can show up
-/// after the daemon starts, and giving up once would mean never running the
-/// curve on a machine that was merely slow to load a module.
-struct Sensors {
-    resolved: Vec<(Sensor, Option<PathBuf>)>,
-    aggregate: Aggregate,
+/// One configured curve plus the state needed to run it.
+struct Runner {
+    name: String,
+    sensor: Sensor,
+    points: Vec<Point>,
+    panic_c: u8,
+    /// Resolved lazily and retried: a hwmon can appear after we start, and
+    /// giving up once would mean never running that curve again.
+    paths: Vec<PathBuf>,
+    smoothed: Option<Smoothed>,
+}
+
+struct Curves {
+    runners: Vec<Runner>,
+    smoothing: Smoothing,
     complained: bool,
 }
 
-impl Sensors {
-    fn resolve(config: &Config) -> Self {
-        let mut sensors = Self {
-            resolved: config
-                .sensors
-                .iter()
-                .map(|sensor| (sensor.clone(), sensor::resolve(sensor)))
-                .collect(),
-            aggregate: config.aggregate,
+impl Curves {
+    fn build(config: &Config) -> Self {
+        let runners = config
+            .curves
+            .iter()
+            .enumerate()
+            .map(|(index, curve)| Runner {
+                name: curve::describe(curve, index),
+                sensor: curve.sensor.clone(),
+                points: curve.points.clone(),
+                panic_c: curve.panic_c.unwrap_or(config.smoothing.panic_c),
+                paths: sensor::resolve_all(&curve.sensor),
+                smoothed: None,
+            })
+            .collect();
+
+        let mut curves = Self {
+            runners,
+            smoothing: config.smoothing,
             complained: false,
         };
-        sensors.complain_about_missing();
-        sensors
-    }
-
-    fn describe(sensor: &Sensor) -> String {
-        if sensor.label.is_empty() {
-            format!("{} (first input)", sensor.hwmon)
-        } else {
-            format!("{}/{}", sensor.hwmon, sensor.label)
-        }
+        curves.complain_about_missing();
+        curves
     }
 
     fn complain_about_missing(&mut self) {
-        let missing: Vec<String> = self
-            .resolved
+        let missing: Vec<&str> = self
+            .runners
             .iter()
-            .filter(|(_, path)| path.is_none())
-            .map(|(sensor, _)| Self::describe(sensor))
+            .filter(|runner| runner.paths.is_empty())
+            .map(|runner| runner.name.as_str())
             .collect();
 
         if missing.is_empty() || self.complained {
@@ -108,30 +118,61 @@ impl Sensors {
             .collect();
 
         warn!(
-            "no sensor for: {}, retrying. available: {}",
+            "no sensor for curve(s): {}, retrying. available: {}",
             missing.join(", "),
             available.join(", ")
         );
     }
 
-    /// Current temperature for the curve, retrying anything unresolved.
-    fn read(&mut self) -> Option<u8> {
-        let mut readings = Vec::new();
+    /// Evaluate every curve. Curves whose sensor is missing are skipped, not
+    /// fatal - the rest keep the cooler running.
+    fn evaluate(&mut self, dt_secs: f32) -> Vec<Demand> {
+        let mut demands = Vec::new();
 
-        for (sensor, path) in &mut self.resolved {
-            if path.is_none() {
-                *path = sensor::resolve(sensor);
-                if path.is_some() {
-                    info!("sensor {} found", Sensors::describe(sensor));
+        for runner in &mut self.runners {
+            if runner.paths.is_empty() {
+                runner.paths = sensor::resolve_all(&runner.sensor);
+                if !runner.paths.is_empty() {
+                    info!("curve {}: sensor found", runner.name);
                 }
             }
 
-            if let Some(reading) = path.as_deref().and_then(sensor::read) {
-                readings.push(reading);
+            // Several inputs behind one curve (two DIMMs, two drives) collapse
+            // to the hottest: that is the one needing air.
+            let Some(raw) = runner
+                .paths
+                .iter()
+                .filter_map(|path| sensor::read(path))
+                .max()
+            else {
+                continue;
+            };
+
+            let smoothed = match &mut runner.smoothed {
+                Some(state) => state.update(raw, dt_secs, &self.smoothing),
+                None => {
+                    // Start from the first reading rather than crawling up from
+                    // zero, which would ignore a machine that is already warm.
+                    runner.smoothed = Some(Smoothed::new(raw));
+                    raw
+                }
+            };
+
+            let panicking = raw >= runner.panic_c;
+            let effective = if panicking { raw } else { smoothed };
+
+            if let Some(rpm) = curve::target_for(&runner.points, effective) {
+                demands.push(Demand {
+                    name: runner.name.clone(),
+                    temp_c: raw,
+                    smoothed_c: smoothed,
+                    rpm,
+                    panic: panicking,
+                });
             }
         }
 
-        self.aggregate.apply(&readings)
+        demands
     }
 }
 
@@ -306,7 +347,8 @@ fn control_loop(
     shared: &Arc<Mutex<Shared>>,
 ) -> Result<(), Error> {
     let mut device: Option<Device> = None;
-    let mut sensors = Sensors::resolve(config);
+    let mut curves = Curves::build(config);
+    let interval = config.interval_secs.max(1) as f32;
 
     // Tracked so the target is only rewritten when it actually moves, and so a
     // reconnect can restore it: realtime mode does not survive one.
@@ -319,7 +361,7 @@ fn control_loop(
                     if fresh != *config {
                         info!("config reloaded from {}", config_path.display());
                         *config = fresh;
-                        sensors = Sensors::resolve(config);
+                        curves = Curves::build(config);
                         applied = None;
                     }
                 }
@@ -337,8 +379,10 @@ fn control_loop(
 
                     Request::SetConfig { config: fresh } => {
                         *config = fresh;
-                        config.curve.sort_by_key(|point| point.temp_c);
-                        sensors = Sensors::resolve(config);
+                        for curve in &mut config.curves {
+                            curve.points.sort_by_key(|point| point.temp_c);
+                        }
+                        curves = Curves::build(config);
                         applied = None;
                         persist(config, config_path, writable)
                     }
@@ -384,7 +428,8 @@ fn control_loop(
                     continue;
                 };
 
-                let temp = sensors.read();
+                let demands = curves.evaluate(interval);
+                let leader = curve::winner(&demands).cloned();
                 let mut lost = false;
 
                 match dev.read_status(READ_TIMEOUT) {
@@ -396,11 +441,14 @@ fn control_loop(
                     Err(err) => warn!("read failed: {err}"),
 
                     Ok(status) => {
-                        if temp.is_none() {
+                        if leader.is_none() {
                             debug!("no temperature yet");
                         }
 
-                        if let Some(wanted) = temp.and_then(|t| config.target_for(t)) {
+                        // A manual speed overrides every curve, by design.
+                        let wanted = config.manual_rpm.or(leader.as_ref().map(|d| d.rpm));
+
+                        if let Some(wanted) = wanted {
                             // Re-apply when the curve moves enough to matter, and
                             // whenever the cooler has fallen back to gear mode -
                             // a reconnect or the physical button does that.
@@ -411,7 +459,16 @@ fn control_loop(
                             if moved || drifted {
                                 match apply(dev, wanted) {
                                     Ok(()) => {
-                                        debug!("target {wanted} rpm at {temp:?} C");
+                                        match &leader {
+                                            Some(d) => debug!(
+                                                "target {wanted} rpm, led by {} at {} C (smoothed {}){}",
+                                                d.name,
+                                                d.temp_c,
+                                                d.smoothed_c,
+                                                if d.panic { ", panic" } else { "" }
+                                            ),
+                                            None => debug!("target {wanted} rpm (manual)"),
+                                        }
                                         applied = Some(wanted);
                                     }
                                     Err(err) => {
@@ -426,10 +483,12 @@ fn control_loop(
                             shared.lock().unwrap().status = Some(Status {
                                 model: dev.model.name().to_string(),
                                 connected: true,
-                                temp_c: temp,
+                                temp_c: leader.as_ref().map(|d| d.temp_c),
                                 current_rpm: Some(status.current_rpm),
                                 target_rpm: applied.or(Some(status.target_rpm)),
                                 manual: config.manual_rpm.is_some(),
+                                leading: leader.as_ref().map(|d| d.name.clone()),
+                                demands: demands.clone(),
                             });
                         }
                     }
@@ -459,10 +518,7 @@ fn persist(config: &Config, path: &Path, writable: bool) -> Reply {
         return Reply::Ok {
             warning: Some(Warning {
                 code: WarningCode::ConfigReadOnly,
-                message: format!(
-                    "{} is read-only, change not saved",
-                    path.display()
-                ),
+                message: format!("{} is read-only, change not saved", path.display()),
             }),
         };
     }

@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(
-        "no cooler found (check bluetooth pairing and udev rules)"
-    )]
+    #[error("no cooler found (check bluetooth pairing and udev rules)")]
     NotFound,
 
     #[error("cannot open {path}: {source}")]

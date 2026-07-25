@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::curve::Demand;
 
 pub const DEFAULT_SOCKET: &str = "/run/flydigictl/flydigictl.sock";
 
@@ -68,4 +69,10 @@ pub struct Status {
     pub current_rpm: Option<u16>,
     pub target_rpm: Option<u16>,
     pub manual: bool,
+
+    /// Curve currently setting the speed, so a client can say *why* it is loud.
+    pub leading: Option<String>,
+
+    /// Every curve's reading and demand, for graphs and debugging.
+    pub demands: Vec<Demand>,
 }
