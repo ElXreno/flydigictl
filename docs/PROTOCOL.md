@@ -99,5 +99,16 @@ rated for 4000 RPM at its top gear, and its four gears are roughly idle, 2700,
 USB-C port; powered from a laptop USB port the cooler stays at 2700 RPM.
 
 Losing power even briefly - a PD renegotiation on a shared GaN charger will do
-it - resets the cooler to its first gear and drops the Bluetooth link, taking
-the hidraw node with it until it reconnects.
+it - drops the Bluetooth link and takes the hidraw node with it.
+
+What survives that, and what does not:
+
+- The selected gear is stored in the cooler and comes back with it.
+- A realtime target does **not**. The device returns in gear mode (`0x02`) at
+  the gear's own speed, so anything holding a custom RPM has to re-send `0x23`
+  and `0x21` after every reconnect.
+
+Reconnecting creates a *new* HID device, so an open descriptor is dead even
+when the node reuses its old name. The device may also enumerate more than once
+before it settles - the first node can appear and never deliver a frame - so
+recovery should keep retrying rather than assume the first reopen won.
