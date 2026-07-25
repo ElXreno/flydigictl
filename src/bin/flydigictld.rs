@@ -317,9 +317,23 @@ fn serve(path: &Path, tx: Sender<Event>, shared: Arc<Mutex<Shared>>) -> Result<(
             }
             let _ = std::fs::remove_file(path);
 
-            UnixListener::bind(path).map_err(|source| Error::Open {
-                path: path.to_path_buf(),
-                source,
+            UnixListener::bind(path).map_err(|source| {
+                // Under systemd the socket is created for us, in a directory an
+                // unprivileged daemon has no business writing to. Getting here
+                // means the service ran without that descriptor, which is a
+                // wiring problem rather than something to retry into.
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    return Error::Config(format!(
+                        "no socket was passed and {} cannot be created here: start \
+                         flydigictld.socket, or point --socket somewhere writable",
+                        path.display()
+                    ));
+                }
+
+                Error::Open {
+                    path: path.to_path_buf(),
+                    source,
+                }
             })?
         }
     };

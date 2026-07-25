@@ -122,7 +122,15 @@ in
       systemd.services.flydigictld = {
         description = "Flydigi cooler fan curve daemon";
         wantedBy = [ "multi-user.target" ];
-        after = [ "bluetooth.target" ];
+
+        # The socket is not merely an entry point, it is the only one: systemd
+        # creates it in a directory the dynamic user cannot write to, so a
+        # daemon started without that descriptor has nowhere to listen.
+        requires = [ "flydigictld.socket" ];
+        after = [
+          "flydigictld.socket"
+          "bluetooth.target"
+        ];
 
         serviceConfig = {
           ExecStart = lib.getExe' cfg.package "flydigictld";
