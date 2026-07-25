@@ -22,8 +22,16 @@ pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 /// 4000 RPM is the rated ceiling of a BS3 Pro (and a BS2 Pro). Reaching it also
 /// needs a 9V/3A PD adapter in the side USB-C port - powered from a laptop USB
 /// port the cooler stays at its level 2 gear, 2700 RPM.
-pub const MIN_RPM: u16 = 800;
+///
+/// The low end was measured: 500 RPM holds steady, while 100-400 make the fan
+/// stall and the tachometer flip between 0 and 400. A target of exactly 0 is
+/// honoured and stops the fan.
+pub const MIN_RPM: u16 = 500;
 pub const MAX_RPM: u16 = 4000;
+
+/// Stopping the fan is the one target below [`MIN_RPM`] the device handles
+/// cleanly.
+pub const STOP_RPM: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {

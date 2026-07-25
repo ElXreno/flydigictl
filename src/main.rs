@@ -149,20 +149,27 @@ fn run() -> Result<()> {
         }
 
         Command::Set(cmd) => {
-            if !(MIN_RPM..=MAX_RPM).contains(&cmd.rpm) {
+            let stopping = cmd.rpm == protocol::STOP_RPM;
+            if !stopping && !(MIN_RPM..=MAX_RPM).contains(&cmd.rpm) {
                 return Err(Error::RpmOutOfRange {
                     rpm: cmd.rpm,
                     min: MIN_RPM,
                     max: MAX_RPM,
                 });
             }
+
             dev.send(protocol::enter_realtime())?;
             std::thread::sleep(Duration::from_millis(300));
             dev.send(protocol::set_realtime_rpm(cmd.rpm))?;
-            info!(
-                "target {} rpm",
-                cmd.rpm
-            );
+
+            if stopping {
+                info!("fan stopped");
+            } else {
+                info!(
+                    "target {} rpm",
+                    cmd.rpm
+                );
+            }
         }
 
         Command::Auto(_) => {
