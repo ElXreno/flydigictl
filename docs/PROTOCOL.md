@@ -58,14 +58,25 @@ Queries answer with data in the same shape. Captured from a BS3 Pro:
 
 | Query  | Payload             | Reading                                     |
 |--------|---------------------|---------------------------------------------|
-| `0x01` | `00 00 02 04`       | device info, likely firmware 2.4            |
-| `0x02` | `01`                | config flag                                 |
-| `0x04` | `xx xx xx xx xx xx` | config snapshot, not decoded                |
+| `0x01` | `00 00 02 04`       | firmware version 0.0.2.4                    |
+| `0x02` | `01`                | awake; `02` means asleep                    |
+| `0x04` | six bytes           | the cooler's MAC address                    |
 | `0x25` | `01`               | work mode                                    |
 | `0x27` | `a4 06 60 09 b8 0b 74 0e` | gear speeds: 1700, 2400, 3000, 3700 |
 
 Note that `0x27` returns exactly four values, one per gear. The low/medium/high
 split inside each gear exists only in the vendor app.
+
+`0x02` reads the same sleep flag that standby sets, so it answers `01` for as
+long as a host is talking to the cooler and `02` only after it has gone to
+sleep.
+
+`0x04` is answered by the dispatcher itself rather than a handler: it calls the
+CH59x ROM routine to read six bytes from `0x7F018`, the factory MAC. `0xF0`
+returns the same six bytes and `0x0B` embeds them after a fixed preamble.
+Checked against the paired address on a BS3 Pro: reverse the payload and the
+two agree in five bytes of six, with the top byte `0x40` higher on the air.
+Treat it as a device identifier and keep it out of logs and bug reports.
 
 ## Status notification (`0xEF`)
 
@@ -123,7 +134,8 @@ the target on every tick, and pins the cooler in an override it never leaves.
 | `0x47` | Write effect frame  | index + 10 bytes   | yes      |
 | `0x48` | Gear indicator LED  | `00` off, `01` on  | yes      |
 | `0x01` | Query device info   | none               | yes      |
-| `0x04` | Query config        | none               | yes      |
+| `0x04` | Query MAC address   | none               | yes      |
+| `0x02` | Query power state   | none               | yes      |
 | `0x25` | Query work mode     | none               | yes      |
 | `0x27` | Query gear RPM table| none               | yes      |
 
