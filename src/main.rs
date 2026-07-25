@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const LIGHT_GAP: Duration = Duration::from_millis(5);
@@ -203,6 +203,20 @@ fn print_status(status: &protocol::Status) {
     );
 }
 
+/// Ask the cooler how much power it has.
+///
+/// Treated as advisory: an older model that does not answer should not stop a
+/// command the firmware is free to clamp on its own.
+fn read_supply(dev: &mut Device) -> Option<protocol::Supply> {
+    match dev.query(protocol::query_supply(), ACK_TIMEOUT) {
+        Ok(payload) => payload.first().copied().map(protocol::Supply::from_byte),
+        Err(err) => {
+            debug!("cannot read the supply level: {err}");
+            None
+        }
+    }
+}
+
 fn run() -> Result<()> {
     let args: Args = argh::from_env();
 
@@ -250,7 +264,16 @@ fn run() -> Result<()> {
     match args.command {
         Command::List(_) | Command::Sensors(_) => unreachable!("handled above"),
 
-        Command::Status(_) => print_status(&dev.read_status(READ_TIMEOUT)?),
+        Command::Status(_) => {
+            print_status(&dev.read_status(READ_TIMEOUT)?);
+            if let Some(supply) = read_supply(&mut dev) {
+                println!(
+                    "supply {supply}, up to {} rpm and gear {}",
+                    supply.max_rpm(),
+                    supply.max_gear()
+                );
+            }
+        }
 
         Command::Watch(cmd) => {
             let mut seen = 0usize;
@@ -294,6 +317,18 @@ fn run() -> Result<()> {
                 });
             }
 
+            // The cooler will take the command either way and quietly hold a
+            // lower speed, which looks like the tool lying about the target.
+            if let Some(supply) = read_supply(&mut dev) {
+                if cmd.rpm > supply.max_rpm() {
+                    warn!(
+                        "supply is {supply}, so the cooler will hold {} rpm rather than {}",
+                        supply.max_rpm(),
+                        cmd.rpm
+                    );
+                }
+            }
+
             dev.send_acked(protocol::enter_realtime(), ACK_TIMEOUT)?;
             std::thread::sleep(Duration::from_millis(300));
             dev.send_acked(protocol::set_realtime_rpm(cmd.rpm), ACK_TIMEOUT)?;
@@ -325,15 +360,29 @@ fn run() -> Result<()> {
                     });
                 }
 
+                let supply = read_supply(&mut dev);
                 let report = protocol::set_gear_rpm(gear, cmd.rpm)
                     .ok_or_else(|| Error::BadArgument(cmd.gear.clone()))?;
 
-                // The firmware refuses gears the supply cannot carry and says
-                // so in the acknowledgement instead of failing silently.
+                // A rejected gear index is the one case the acknowledgement
+                // reports instead of failing silently.
                 if dev.send_acked(report, ACK_TIMEOUT)? == 0 {
                     return Err(Error::GearRejected { gear: cmd.gear });
                 }
                 info!("gear {gear} stored at {} rpm", cmd.rpm);
+
+                // Storing always works; running the gear is what the supply
+                // gates, so say which of the two just happened.
+                if let Some(supply) = supply {
+                    if !supply.allows(gear) {
+                        warn!("supply is {supply}, so this gear will not run until it improves");
+                    } else if cmd.rpm > supply.max_rpm() {
+                        warn!(
+                            "supply is {supply}, so the gear will hold {} rpm",
+                            supply.max_rpm()
+                        );
+                    }
+                }
             }
 
             None => {
@@ -341,9 +390,15 @@ fn run() -> Result<()> {
                 let table = protocol::parse_gear_table(&payload).ok_or(Error::NoAck {
                     cmd: protocol::CMD_QUERY_GEAR_TABLE,
                 })?;
+                let supply = read_supply(&mut dev);
 
                 for (gear, rpm) in protocol::Gear::ALL.iter().zip(table) {
-                    println!("{:<10} {rpm:4} rpm", gear.to_string());
+                    let note = match supply {
+                        Some(supply) if !supply.allows(*gear) => "  needs more power",
+                        Some(supply) if rpm > supply.max_rpm() => "  held lower by the supply",
+                        _ => "",
+                    };
+                    println!("{:<10} {rpm:4} rpm{note}", gear.to_string());
                 }
             }
         },

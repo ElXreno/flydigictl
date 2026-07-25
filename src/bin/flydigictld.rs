@@ -381,6 +381,11 @@ fn control_loop(
     // reconnect can restore it: realtime mode does not survive one.
     let mut applied: Option<u16> = None;
 
+    // Read once per connection: the level only changes with the supply, and
+    // that means a re-enumeration anyway.
+    let mut supply: Option<protocol::Supply> = None;
+    let mut warned_about_supply = false;
+
     for event in rx {
         match event {
             Event::ConfigChanged => match Config::load(config_path) {
@@ -423,7 +428,23 @@ fn control_loop(
                         rpm => {
                             config.manual_rpm = rpm;
                             applied = None;
-                            persist(config, config_path, writable)
+                            let reply = persist(config, config_path, writable);
+
+                            // A read-only config is a standing fact a client
+                            // also learns from `get_config`, while this one is
+                            // about the speed just requested, so it wins.
+                            match (rpm, supply) {
+                                (Some(rpm), Some(supply)) if rpm > supply.max_rpm() => Reply::Ok {
+                                    warning: Some(Warning {
+                                        code: WarningCode::SupplyLimited,
+                                        message: format!(
+                                            "supply is {supply}, holding {} rpm instead of {rpm}",
+                                            supply.max_rpm()
+                                        ),
+                                    }),
+                                },
+                                _ => reply,
+                            }
                         }
                     },
                 };
@@ -438,6 +459,12 @@ fn control_loop(
                         info!("{} on {}", dev.model.name(), dev.path.display());
                         // A fresh connection is back in gear mode.
                         applied = None;
+
+                        supply = read_supply(dev);
+                        warned_about_supply = false;
+                        if let Some(supply) = supply {
+                            info!("supply {supply}, up to {} rpm", supply.max_rpm());
+                        }
 
                         // Re-assert standby on every connection: it is stored in
                         // the cooler, but the cooler is what we just met.
@@ -473,7 +500,25 @@ fn control_loop(
                         }
 
                         // A manual speed overrides every curve, by design.
-                        let wanted = config.manual_rpm.or(leader.as_ref().map(|d| d.rpm));
+                        let asked = config.manual_rpm.or(leader.as_ref().map(|d| d.rpm));
+
+                        // Sending more than the supply allows is not an error,
+                        // the firmware just holds its ceiling - but then every
+                        // number the daemon reports is a speed the fan is not
+                        // running at, so clamp here and say so once.
+                        let wanted = match (asked, supply) {
+                            (Some(rpm), Some(supply)) if rpm > supply.max_rpm() => {
+                                if !warned_about_supply {
+                                    warned_about_supply = true;
+                                    warn!(
+                                        "supply is {supply}: capping {rpm} rpm at {}",
+                                        supply.max_rpm()
+                                    );
+                                }
+                                Some(supply.max_rpm())
+                            }
+                            (rpm, _) => rpm,
+                        };
 
                         if let Some(wanted) = wanted {
                             // Re-apply when the curve moves enough to matter, and
@@ -514,6 +559,8 @@ fn control_loop(
                                 current_rpm: Some(status.current_rpm),
                                 target_rpm: applied.or(Some(status.target_rpm)),
                                 manual: config.manual_rpm.is_some(),
+                                supply: supply.map(|supply| supply.to_string()),
+                                supply_max_rpm: supply.map(|supply| supply.max_rpm()),
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 demands: demands.clone(),
                             });
@@ -531,6 +578,18 @@ fn control_loop(
     }
 
     Ok(())
+}
+
+/// Ask the cooler how much power it has, tolerating a device that does not know
+/// the query.
+fn read_supply(dev: &mut Device) -> Option<protocol::Supply> {
+    match dev.query(protocol::query_supply(), ACK_TIMEOUT) {
+        Ok(payload) => payload.first().copied().map(protocol::Supply::from_byte),
+        Err(err) => {
+            debug!("cannot read the supply level: {err}");
+            None
+        }
+    }
 }
 
 fn apply(dev: &mut Device, rpm: u16) -> Result<(), Error> {

@@ -21,6 +21,7 @@ pub const CMD_EXIT_REALTIME: u8 = 0x24;
 pub const CMD_STATUS_NOTIFY: u8 = 0xEF;
 
 pub const CMD_SET_STANDBY: u8 = 0x0D;
+pub const CMD_QUERY_SUPPLY: u8 = 0x07;
 pub const CMD_SET_GEAR_RPM: u8 = 0x26;
 pub const CMD_QUERY_GEAR_TABLE: u8 = 0x27;
 
@@ -217,6 +218,78 @@ impl std::str::FromStr for Gear {
             _ => Err(()),
         }
     }
+}
+
+/// How much power the cooler is getting, which is what decides how fast it is
+/// allowed to spin.
+///
+/// The firmware keeps this as a level of 1 to 3, updated whenever the supply
+/// changes, and enforces it in two places: the control loop clamps every
+/// target, realtime ones included, and a gear too high for the level is stored
+/// but not applied. Both ceilings come straight from the disassembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supply {
+    /// Bus power, typically a laptop USB port.
+    Low,
+    /// Enough for everything but the top gear.
+    Medium,
+    /// A PD adapter in the side port: the full range.
+    Full,
+    Unknown(u8),
+}
+
+impl Supply {
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Low,
+            2 => Self::Medium,
+            3 => Self::Full,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The speed the firmware clamps to. An unrecognised level is treated as
+    /// unrestricted: the cooler enforces its own limit anyway, and guessing low
+    /// would cap a device we simply do not know.
+    pub fn max_rpm(self) -> u16 {
+        match self {
+            Self::Low => 2700,
+            Self::Medium => 3300,
+            Self::Full | Self::Unknown(_) => MAX_RPM,
+        }
+    }
+
+    /// The highest gear that can be selected right now.
+    pub fn max_gear(self) -> Gear {
+        match self {
+            Self::Low => Gear::Standard,
+            Self::Medium => Gear::Strong,
+            Self::Full | Self::Unknown(_) => Gear::Overclock,
+        }
+    }
+
+    pub fn allows(self, gear: Gear) -> bool {
+        match (gear.slot(), self.max_gear().slot()) {
+            (Some(wanted), Some(ceiling)) => wanted <= ceiling,
+            _ => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Supply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::Full => write!(f, "full"),
+            Self::Unknown(n) => write!(f, "unknown({n})"),
+        }
+    }
+}
+
+/// Ask how much power the cooler thinks it has.
+pub fn query_supply() -> [u8; REPORT_LEN] {
+    build_report(CMD_QUERY_SUPPLY, &[])
 }
 
 /// Ask for the four stored gear speeds.
