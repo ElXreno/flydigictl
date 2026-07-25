@@ -15,17 +15,15 @@ pub const DEFAULT_PATH: &str = "/etc/flydigictl/config.toml";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Where to read temperatures from. Several may be listed - a laptop
-    /// usually wants the CPU and the GPU, whichever is hotter.
-    pub sensors: Vec<Sensor>,
+    /// One curve per subsystem. Each converts its own sensor into a speed, and
+    /// the highest of those speeds wins - temperatures from a CPU and a stick
+    /// of RAM mean entirely different things and must not be averaged.
+    pub curves: Vec<Curve>,
 
-    /// How to combine several sensors into the number the curve sees.
-    pub aggregate: Aggregate,
+    /// Input smoothing, shared by every curve.
+    pub smoothing: Smoothing,
 
-    /// Fan curve, sorted by temperature on load.
-    pub curve: Vec<Point>,
-
-    /// How often to sample the sensor.
+    /// How often to sample the sensors.
     pub interval_secs: u64,
 
     /// Only change the target once it moves by at least this much, to stop the
@@ -43,46 +41,67 @@ pub struct Config {
     pub standby: Option<crate::protocol::Standby>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Curve {
+    /// Shown in logs and status; defaults to the sensor it follows.
+    pub name: String,
+
+    /// Sensor this curve reacts to.
+    pub sensor: Sensor,
+
+    /// Points, sorted by temperature on load.
+    pub points: Vec<Point>,
+
+    /// Raw temperature at which this curve stops being smoothed.
+    ///
+    /// Per-curve because the number means nothing on its own: 85 °C is a normal
+    /// load for a CPU and long past trouble for an SSD. Falls back to
+    /// [`Smoothing::panic_c`].
+    pub panic_c: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sensor {
-    /// hwmon driver name, e.g. "k10temp" or "coretemp".
+    /// hwmon driver name, e.g. "k10temp", "nvme" or "spd5118".
     pub hwmon: String,
 
-    /// Label of the input to use, e.g. "Tctl". Empty means the first input.
+    /// Label of the input, e.g. "Tctl". Empty matches every input of that
+    /// hwmon, and the hottest of them is used - which is what you want for two
+    /// sticks of RAM or a pair of drives.
     pub label: String,
+}
+
+/// Smoothing applied to every sensor before its curve sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Smoothing {
+    /// Time constant while the temperature climbs.
+    pub rise_secs: f32,
+
+    /// Time constant while it falls; larger than `rise_secs` keeps the fan from
+    /// dropping back the moment a burst of load ends.
+    pub fall_secs: f32,
+
+    /// A raw reading at or above this bypasses smoothing entirely.
+    pub panic_c: u8,
+}
+
+impl Default for Smoothing {
+    fn default() -> Self {
+        Self {
+            rise_secs: 10.0,
+            fall_secs: 60.0,
+            panic_c: 85,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub temp_c: u8,
     pub rpm: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Aggregate {
-    /// Follow the hottest sensor. Safe default: cooling is about the worst
-    /// case, not the average one.
-    #[default]
-    Max,
-    /// Average of the sensors that could be read.
-    Mean,
-}
-
-impl Aggregate {
-    pub fn apply(self, readings: &[u8]) -> Option<u8> {
-        if readings.is_empty() {
-            return None;
-        }
-        match self {
-            Self::Max => readings.iter().copied().max(),
-            Self::Mean => {
-                let sum: u32 = readings.iter().map(|t| u32::from(*t)).sum();
-                Some((sum / readings.len() as u32) as u8)
-            }
-        }
-    }
 }
 
 impl Default for Sensor {
@@ -97,27 +116,30 @@ impl Default for Sensor {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sensors: vec![Sensor::default()],
-            aggregate: Aggregate::Max,
-            curve: vec![
-                Point { temp_c: 45, rpm: 0 },
-                Point {
-                    temp_c: 55,
-                    rpm: 1300,
-                },
-                Point {
-                    temp_c: 65,
-                    rpm: 2100,
-                },
-                Point {
-                    temp_c: 75,
-                    rpm: 2800,
-                },
-                Point {
-                    temp_c: 85,
-                    rpm: 3500,
-                },
-            ],
+            curves: vec![Curve {
+                name: "cpu".to_string(),
+                sensor: Sensor::default(),
+                panic_c: Some(95),
+                points: vec![
+                    Point {
+                        temp_c: 55,
+                        rpm: 500,
+                    },
+                    Point {
+                        temp_c: 70,
+                        rpm: 1500,
+                    },
+                    Point {
+                        temp_c: 85,
+                        rpm: 2800,
+                    },
+                    Point {
+                        temp_c: 95,
+                        rpm: 4000,
+                    },
+                ],
+            }],
+            smoothing: Smoothing::default(),
             interval_secs: 3,
             hysteresis_rpm: 100,
             manual_rpm: None,
@@ -138,7 +160,9 @@ impl Config {
             source,
         })?;
 
-        config.curve.sort_by_key(|point| point.temp_c);
+        for curve in &mut config.curves {
+            curve.points.sort_by_key(|point| point.temp_c);
+        }
         Ok(config)
     }
 
@@ -183,42 +207,6 @@ impl Config {
             Err(_) => false,
         }
     }
-
-    /// Target speed for a temperature, interpolated between curve points.
-    pub fn target_for(&self, temp_c: u8) -> Option<u16> {
-        if let Some(rpm) = self.manual_rpm {
-            return Some(rpm);
-        }
-
-        let curve = &self.curve;
-        let first = curve.first()?;
-        let last = curve.last()?;
-
-        if temp_c <= first.temp_c {
-            return Some(first.rpm);
-        }
-        if temp_c >= last.temp_c {
-            return Some(last.rpm);
-        }
-
-        let upper = curve.iter().position(|p| p.temp_c >= temp_c)?;
-        let (a, b) = (curve[upper - 1], curve[upper]);
-        let span = u32::from(b.temp_c - a.temp_c);
-        if span == 0 {
-            return Some(b.rpm);
-        }
-
-        let into = u32::from(temp_c - a.temp_c);
-        let low = u32::from(a.rpm);
-        let high = u32::from(b.rpm);
-        let rpm = if high >= low {
-            low + (high - low) * into / span
-        } else {
-            low - (low - high) * into / span
-        };
-
-        Some(rpm as u16)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,52 +237,36 @@ pub enum ConfigError {
 mod tests {
     use super::*;
 
-    fn curve() -> Config {
-        Config {
-            curve: vec![
-                Point { temp_c: 40, rpm: 0 },
-                Point {
-                    temp_c: 60,
-                    rpm: 1000,
-                },
-                Point {
-                    temp_c: 80,
-                    rpm: 3000,
-                },
-            ],
-            ..Config::default()
-        }
-    }
-
-    #[test]
-    fn holds_the_ends_of_the_curve() {
-        let config = curve();
-        assert_eq!(config.target_for(20), Some(0));
-        assert_eq!(config.target_for(40), Some(0));
-        assert_eq!(config.target_for(95), Some(3000));
-    }
-
-    #[test]
-    fn interpolates_between_points() {
-        let config = curve();
-        assert_eq!(config.target_for(50), Some(500));
-        assert_eq!(config.target_for(70), Some(2000));
-    }
-
-    #[test]
-    fn manual_speed_wins_over_the_curve() {
-        let config = Config {
-            manual_rpm: Some(1234),
-            ..curve()
-        };
-        assert_eq!(config.target_for(90), Some(1234));
-    }
-
     #[test]
     fn round_trips_through_toml() {
-        let config = curve();
+        let config = Config::default();
         let text = toml::to_string_pretty(&config).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn sorts_curve_points_on_load() {
+        let text = r#"
+            [[curves]]
+            name = "ram"
+            sensor = { hwmon = "spd5118" }
+            points = [
+              { temp_c = 70, rpm = 4000 },
+              { temp_c = 45, rpm = 500 },
+              { temp_c = 60, rpm = 2400 },
+            ]
+        "#;
+
+        let dir = std::env::temp_dir().join("flydigictl-config-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, text).unwrap();
+
+        let config = Config::load(&path).unwrap();
+        let temps: Vec<u8> = config.curves[0].points.iter().map(|p| p.temp_c).collect();
+        assert_eq!(temps, vec![45, 60, 70]);
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

@@ -96,3 +96,16 @@ fn label_of(input: &Path) -> Option<String> {
 fn read_trimmed(path: &Path) -> Option<String> {
     Some(std::fs::read_to_string(path).ok()?.trim().to_string())
 }
+
+/// All inputs a config entry matches.
+///
+/// An empty label matches every input of that hwmon - one curve then covers
+/// both DIMMs or both drives without spelling out indices.
+pub fn resolve_all(sensor: &Sensor) -> Vec<PathBuf> {
+    list()
+        .into_iter()
+        .filter(|entry| entry.hwmon == sensor.hwmon)
+        .filter(|entry| sensor.label.is_empty() || entry.label == sensor.label)
+        .map(|entry| entry.path)
+        .collect()
+}

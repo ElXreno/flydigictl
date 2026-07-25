@@ -1,4 +1,5 @@
 pub mod config;
+pub mod curve;
 pub mod device;
 pub mod error;
 pub mod ipc;
