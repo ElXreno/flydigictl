@@ -33,6 +33,7 @@ enum Command {
     Set(SetCmd),
     Auto(AutoCmd),
     Standby(StandbyCmd),
+    Sensors(SensorsCmd),
     Light(LightCmd),
 }
 
@@ -68,6 +69,11 @@ struct SetCmd {
 #[derive(argh::FromArgs)]
 #[argh(subcommand, name = "auto")]
 struct AutoCmd {}
+
+/// list temperature sensors the daemon could use
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "sensors")]
+struct SensorsCmd {}
 
 /// choose what the cooler does when the host disconnects
 #[derive(argh::FromArgs)]
@@ -177,6 +183,28 @@ fn run() -> Result<()> {
         .format_target(false)
         .init();
 
+    // Neither of these needs the cooler, so answer before opening it.
+    if let Command::Sensors(_) = args.command {
+        let available = flydigictl::sensor::list();
+        if available.is_empty() {
+            return Err(Error::Config("no hwmon sensors found".to_string()));
+        }
+        for entry in available {
+            let temp = flydigictl::sensor::read(&entry.path);
+            println!(
+                "{:<24} {:<12} {}",
+                entry.hwmon,
+                if entry.label.is_empty() {
+                    "-"
+                } else {
+                    &entry.label
+                },
+                temp.map_or("?".to_string(), |t| format!("{t} C")),
+            );
+        }
+        return Ok(());
+    }
+
     if let Command::List(_) = args.command {
         let found = device::find_all();
         if found.is_empty() {
@@ -192,7 +220,7 @@ fn run() -> Result<()> {
     info!("{} on {}", dev.model.name(), dev.path.display());
 
     match args.command {
-        Command::List(_) => unreachable!("handled above"),
+        Command::List(_) | Command::Sensors(_) => unreachable!("handled above"),
 
         Command::Status(_) => print_status(&dev.read_status(READ_TIMEOUT)?),
 

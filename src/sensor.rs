@@ -1,49 +1,65 @@
-//! Temperature source: plain sysfs hwmon, no external tools.
+//! Temperature sources: plain sysfs hwmon, no external tools.
 
 use std::path::{Path, PathBuf};
 
 use crate::config::Sensor;
 
-/// Resolve the hwmon input a config asks for, so the path is looked up once
-/// rather than on every sample.
-pub fn resolve(sensor: &Sensor) -> Option<PathBuf> {
-    let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
+/// One temperature input the system offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Available {
+    pub hwmon: String,
+    pub label: String,
+    pub path: PathBuf,
+}
+
+/// Everything readable under `/sys/class/hwmon`, for `flydigictl sensors` and
+/// for telling the user what they could have written instead.
+pub fn list() -> Vec<Available> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
+        return Vec::new();
+    };
 
     let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     dirs.sort();
 
+    let mut found = Vec::new();
     for dir in dirs {
-        let name = read_trimmed(&dir.join("name"))?;
-        if name != sensor.hwmon {
+        // A hwmon without a name is not something a config can refer to, but it
+        // is no reason to stop looking at the rest.
+        let Some(hwmon) = read_trimmed(&dir.join("name")) else {
             continue;
-        }
+        };
 
-        let mut inputs: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("temp") && n.ends_with("_input"))
-            })
-            .collect();
-        inputs.sort();
-
-        if sensor.label.is_empty() {
-            return inputs.into_iter().next();
-        }
-
-        for input in inputs {
-            let label_path =
-                input.with_file_name(input.file_name()?.to_str()?.replace("_input", "_label"));
-            if read_trimmed(&label_path).is_some_and(|l| l == sensor.label) {
-                return Some(input);
-            }
+        for input in inputs_of(&dir) {
+            let label = label_of(&input).unwrap_or_default();
+            found.push(Available {
+                hwmon: hwmon.clone(),
+                label,
+                path: input,
+            });
         }
     }
 
-    None
+    found
+}
+
+/// Find the input a config entry asks for.
+pub fn resolve(sensor: &Sensor) -> Option<PathBuf> {
+    let available = list();
+
+    let matching = available
+        .iter()
+        .filter(|entry| entry.hwmon == sensor.hwmon)
+        .collect::<Vec<_>>();
+
+    if sensor.label.is_empty() {
+        return matching.first().map(|entry| entry.path.clone());
+    }
+
+    matching
+        .iter()
+        .find(|entry| entry.label == sensor.label)
+        .map(|entry| entry.path.clone())
 }
 
 /// Read a resolved input, in whole degrees.
@@ -51,6 +67,30 @@ pub fn read(path: &Path) -> Option<u8> {
     let millidegrees: i64 = read_trimmed(path)?.parse().ok()?;
     let degrees = millidegrees / 1000;
     (0..=255).contains(&degrees).then_some(degrees as u8)
+}
+
+fn inputs_of(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut inputs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("temp") && name.ends_with("_input"))
+        })
+        .collect();
+
+    inputs.sort();
+    inputs
+}
+
+fn label_of(input: &Path) -> Option<String> {
+    let name = input.file_name()?.to_str()?;
+    read_trimmed(&input.with_file_name(name.replace("_input", "_label")))
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {

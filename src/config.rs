@@ -15,8 +15,12 @@ pub const DEFAULT_PATH: &str = "/etc/flydigictl/config.toml";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Where to read the temperature from.
-    pub sensor: Sensor,
+    /// Where to read temperatures from. Several may be listed - a laptop
+    /// usually wants the CPU and the GPU, whichever is hotter.
+    pub sensors: Vec<Sensor>,
+
+    /// How to combine several sensors into the number the curve sees.
+    pub aggregate: Aggregate,
 
     /// Fan curve, sorted by temperature on load.
     pub curve: Vec<Point>,
@@ -55,6 +59,32 @@ pub struct Point {
     pub rpm: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Aggregate {
+    /// Follow the hottest sensor. Safe default: cooling is about the worst
+    /// case, not the average one.
+    #[default]
+    Max,
+    /// Average of the sensors that could be read.
+    Mean,
+}
+
+impl Aggregate {
+    pub fn apply(self, readings: &[u8]) -> Option<u8> {
+        if readings.is_empty() {
+            return None;
+        }
+        match self {
+            Self::Max => readings.iter().copied().max(),
+            Self::Mean => {
+                let sum: u32 = readings.iter().map(|t| u32::from(*t)).sum();
+                Some((sum / readings.len() as u32) as u8)
+            }
+        }
+    }
+}
+
 impl Default for Sensor {
     fn default() -> Self {
         Self {
@@ -67,7 +97,8 @@ impl Default for Sensor {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sensor: Sensor::default(),
+            sensors: vec![Sensor::default()],
+            aggregate: Aggregate::Max,
             curve: vec![
                 Point { temp_c: 45, rpm: 0 },
                 Point {
