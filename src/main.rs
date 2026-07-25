@@ -83,7 +83,7 @@ struct LightCmd {
 #[argh(subcommand)]
 enum LightWhat {
     Off(LightOffCmd),
-    Temp(LightTempCmd),
+    Effect(LightEffectCmd),
     Static(LightStaticCmd),
     Gear(LightGearCmd),
 }
@@ -106,10 +106,14 @@ struct LightStaticCmd {
 #[argh(subcommand, name = "off")]
 struct LightOffCmd {}
 
-/// let the firmware drive the strip by temperature
+/// play one of the firmware's built-in effects
 #[derive(argh::FromArgs)]
-#[argh(subcommand, name = "temp")]
-struct LightTempCmd {}
+#[argh(subcommand, name = "effect")]
+struct LightEffectCmd {
+    /// effect number, 1-5 (0 replays the uploaded colour)
+    #[argh(positional)]
+    mode: u8,
+}
 
 /// toggle the gear indicator LEDs
 #[derive(argh::FromArgs)]
@@ -252,12 +256,34 @@ fn run() -> Result<()> {
                 info!("strip off");
             }
 
-            LightWhat::Temp(_) => {
-                for report in protocol::light_smart_temp() {
+            LightWhat::Effect(cmd) => {
+                if cmd.mode > protocol::MAX_EFFECT {
+                    return Err(Error::UnknownEffect {
+                        mode: cmd.mode,
+                        max: protocol::MAX_EFFECT,
+                    });
+                }
+
+                // The firmware gates built-in effects behind realtime mode and
+                // still acknowledges them otherwise, so check before promising
+                // anything.
+                if cmd.mode != 0 {
+                    let status = dev.read_status(READ_TIMEOUT)?;
+                    if status.mode != protocol::Mode::Realtime {
+                        return Err(Error::NeedsRealtime);
+                    }
+                }
+
+                for report in protocol::light_effect(cmd.mode) {
                     dev.send_acked(report, ACK_TIMEOUT)?;
                     std::thread::sleep(LIGHT_GAP);
                 }
-                info!("strip on temperature effect");
+
+                if cmd.mode == 0 {
+                    info!("strip on uploaded buffer");
+                } else {
+                    info!("effect {}", cmd.mode);
+                }
             }
 
             LightWhat::Static(cmd) => {

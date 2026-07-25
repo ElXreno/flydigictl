@@ -94,9 +94,13 @@ reports `0x02`/`0x03` instead, so treat the value as model-specific.
 | `0x23` | Enter realtime mode | none               | yes      |
 | `0x24` | Exit realtime mode  | none               | yes      |
 | `0x26` | Set gear RPM        | gear, RPM LE       | no       |
-| `0x44` | Temperature effect  | `01`               | yes      |
+| `0x41` | Effect upload init  | none               | no       |
+| `0x42` | Effect block write  | data               | no       |
+| `0x43` | Play user buffer    | `01`               | yes      |
+| `0x44` | Select effect       | mode `00`-`05`     | yes      |
 | `0x45` | Select strip        | none, then `01`    | yes      |
 | `0x46` | Strip power         | `00` off, `01` on  | yes      |
+| `0x47` | Write effect frame  | index + 10 bytes   | yes      |
 | `0x48` | Gear indicator LED  | `00` off, `01` on  | yes      |
 | `0x01` | Query device info   | none               | yes      |
 | `0x04` | Query config        | none               | yes      |
@@ -150,3 +154,37 @@ Stepping a BS3 Pro down through realtime targets, ten seconds per step:
 
 So 500 RPM is the practical floor, 0 is a genuine passive mode, and anything in
 between is worse than useless - the fan cannot hold a speed there.
+
+## Lighting, as implemented in the firmware
+
+Confirmed by disassembling `CH591_For_BS3PRO_Ver0.0.2.4` (RISC-V, base 0). The
+dispatcher lives at `0x23fa` and looks handlers up in a table at `gp - 0x58C`
+(`gp = 0x20002F18`), filled at runtime by `register_handler(cmd, fn)` at
+`0x2818`.
+
+`0x44` is `set_effect(mode)`:
+
+| mode | Effect |
+|------|--------|
+| `0` | play the buffer uploaded through `0x47`/`0x42` |
+| `1`-`5` | presets with palettes hardcoded in the firmware |
+
+The presets are gated. The handler starts with
+
+```c
+if (mode != 0 && DAT_20003d14 == 0) return;
+```
+
+and that flag is set by `0x23` (enter realtime) and cleared by `0x24` (exit
+realtime). **Built-in effects therefore only play while the fan is in realtime
+mode.** The command is acknowledged either way, so a no-op looks exactly like
+success on the wire - check the fan mode first.
+
+`0x43` is not a generic commit either: it clears the upload counters, persists
+the buffer and calls `set_effect(0)`. Sending it after `0x44 01` replaces the
+preset with the user buffer, which is why a `0x43` tail blanks the strip when
+nothing has been uploaded.
+
+Frame indices are limited: `0x00` is the header, `0x01`-`0x11` carry 10 bytes,
+`0x12` carries 6, and higher indices are acknowledged but discarded. The vendor
+app uploads 30 frames; everything past `0x12` never reaches the strip.
