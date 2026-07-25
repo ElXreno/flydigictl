@@ -12,11 +12,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flydigictl::config::Config;
-use flydigictl::ipc::{Reply, Request, Status, Warning};
+use flydigictl::ipc::{Gear, Light, Reply, Request, Status, Warning};
+use flydigictl::protocol::Standby;
 
 /// Long enough for a daemon busy talking to the cooler, short enough that a
 /// wedged one cannot freeze the window.
 const TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Lighting is a burst of twenty-odd reports the daemon sends one at a time,
+/// so its answer is slow by construction rather than by fault.
+const LIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct Client {
     path: PathBuf,
@@ -65,6 +70,31 @@ impl Client {
         self.acknowledged(&Request::SetManual { rpm })
     }
 
+    pub fn gears(&self) -> Result<Vec<Gear>, String> {
+        match self.request(&Request::Gears)? {
+            Reply::Gears { gears } => Ok(gears),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    pub fn set_gear(&self, gear: &str, rpm: u16) -> Result<Option<Warning>, String> {
+        self.acknowledged(&Request::SetGear {
+            gear: gear.to_string(),
+            rpm,
+        })
+    }
+
+    pub fn light(&self, light: Light) -> Result<Option<Warning>, String> {
+        match self.request_within(LIGHT_TIMEOUT, &Request::Light { light })? {
+            Reply::Ok { warning } => Ok(warning),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    pub fn set_standby(&self, standby: Standby) -> Result<Option<Warning>, String> {
+        self.acknowledged(&Request::SetStandby { standby })
+    }
+
     fn acknowledged(&self, request: &Request) -> Result<Option<Warning>, String> {
         match self.request(request)? {
             Reply::Ok { warning } => Ok(warning),
@@ -73,10 +103,14 @@ impl Client {
     }
 
     fn request(&self, request: &Request) -> Result<Reply, String> {
+        self.request_within(TIMEOUT, request)
+    }
+
+    fn request_within(&self, timeout: Duration, request: &Request) -> Result<Reply, String> {
         let stream = UnixStream::connect(&self.path).map_err(connect_fault)?;
 
-        stream.set_read_timeout(Some(TIMEOUT)).map_err(fault)?;
-        stream.set_write_timeout(Some(TIMEOUT)).map_err(fault)?;
+        stream.set_read_timeout(Some(timeout)).map_err(fault)?;
+        stream.set_write_timeout(Some(timeout)).map_err(fault)?;
 
         let mut writer = stream.try_clone().map_err(fault)?;
         let mut line = serde_json::to_string(request).map_err(fault)?;

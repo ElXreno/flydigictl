@@ -2,18 +2,21 @@
 
 mod client;
 mod editor;
+mod theme;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream, StreamExt};
-use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, slider, text};
+use iced::widget::{
+    button, canvas, checkbox, column, container, pick_list, row, scrollable, slider, text,
+};
 use iced::{Element, Length, Subscription, Theme};
 
 use flydigictl::config::{Config, Point};
 use flydigictl::curve;
-use flydigictl::ipc::{self, Status, Warning};
-use flydigictl::protocol::{MAX_RPM, MIN_RPM};
+use flydigictl::ipc::{self, Light, Status, Warning};
+use flydigictl::protocol::{Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
 
 use client::Client;
 
@@ -61,6 +64,42 @@ enum Message {
     ManualToggled(bool),
     ManualChanged(u16),
     Reload,
+
+    TabSelected(Tab),
+
+    /// Dragging the slider, which is not worth a write to the cooler yet.
+    GearMoved {
+        index: usize,
+        rpm: u16,
+    },
+    /// The slider was let go, so the value is meant.
+    GearCommitted(usize),
+
+    ColorChanged {
+        channel: Channel,
+        value: u8,
+    },
+    LightStatic,
+    LightEffect(u8),
+    LightOff,
+    IndicatorsToggled(bool),
+
+    StandbySelected(Standby),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Curve,
+    Gears,
+    Light,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Red,
+    Green,
+    Blue,
+    Brightness,
 }
 
 struct State {
@@ -71,6 +110,17 @@ struct State {
     selected: usize,
     /// Last thing worth telling the user, from either side of the socket.
     note: Option<String>,
+
+    theme: Theme,
+    tab: Tab,
+
+    /// Read from the cooler rather than from the config: the gear table lives
+    /// in the device and the physical button changes it too.
+    gears: Vec<ipc::Gear>,
+
+    color: [u8; 3],
+    brightness: u8,
+    indicators: bool,
 }
 
 impl State {
@@ -82,9 +132,32 @@ impl State {
             writable: false,
             selected: 0,
             note: None,
+            theme: theme::load(),
+            tab: Tab::Curve,
+            gears: Vec::new(),
+            color: [0x7A, 0xA2, 0xF7],
+            brightness: 100,
+            indicators: true,
         };
         state.reload();
         state
+    }
+
+    fn load_gears(&mut self) {
+        match self.client.gears() {
+            Ok(gears) => self.gears = gears,
+            Err(err) => self.note = Some(err),
+        }
+    }
+
+    /// Everything but the config goes through here: the reply is either a
+    /// warning worth showing or nothing worth saying.
+    fn report(&mut self, outcome: Result<Option<Warning>, String>) {
+        match outcome {
+            Ok(Some(Warning { message, .. })) => self.note = Some(message),
+            Ok(None) => self.note = None,
+            Err(err) => self.note = Some(err),
+        }
     }
 
     fn reload(&mut self) {
@@ -111,11 +184,8 @@ impl State {
             return;
         };
 
-        match self.client.set_config(config) {
-            Ok(Some(Warning { message, .. })) => self.note = Some(message),
-            Ok(None) => self.note = None,
-            Err(err) => self.note = Some(err),
-        }
+        let outcome = self.client.set_config(config);
+        self.report(outcome);
     }
 
     fn ceiling(&self) -> u16 {
@@ -141,8 +211,8 @@ fn title(state: &State) -> String {
     }
 }
 
-fn theme(_state: &State) -> Theme {
-    Theme::CatppuccinMacchiato
+fn theme(state: &State) -> Theme {
+    state.theme.clone()
 }
 
 /// Updates arrive when the cooler has something to say, not on a timer.
@@ -268,32 +338,106 @@ fn update(state: &mut State, message: Message) {
             if let Some(config) = state.config.as_mut() {
                 config.manual_rpm = rpm;
             }
-            match state.client.set_manual(rpm) {
-                Ok(Some(Warning { message, .. })) => state.note = Some(message),
-                Ok(None) => state.note = None,
-                Err(err) => state.note = Some(err),
-            }
+            let outcome = state.client.set_manual(rpm);
+            state.report(outcome);
         }
 
         Message::ManualChanged(rpm) => {
             if let Some(config) = state.config.as_mut() {
                 config.manual_rpm = Some(rpm);
             }
-            match state.client.set_manual(Some(rpm)) {
-                Ok(Some(Warning { message, .. })) => state.note = Some(message),
-                Ok(None) => state.note = None,
-                Err(err) => state.note = Some(err),
+            let outcome = state.client.set_manual(Some(rpm));
+            state.report(outcome);
+        }
+
+        Message::TabSelected(tab) => {
+            state.tab = tab;
+            if tab == Tab::Gears {
+                state.load_gears();
             }
+        }
+
+        Message::GearMoved { index, rpm } => {
+            if let Some(gear) = state.gears.get_mut(index) {
+                gear.rpm = rpm;
+            }
+        }
+
+        Message::GearCommitted(index) => {
+            let Some(gear) = state.gears.get(index).cloned() else {
+                return;
+            };
+            let outcome = state.client.set_gear(&gear.name, gear.rpm);
+            state.report(outcome);
+
+            // The cooler rounds and clamps what it stores, so take its word
+            // for the table rather than our own.
+            state.load_gears();
+        }
+
+        Message::ColorChanged { channel, value } => match channel {
+            Channel::Red => state.color[0] = value,
+            Channel::Green => state.color[1] = value,
+            Channel::Blue => state.color[2] = value,
+            Channel::Brightness => state.brightness = value,
+        },
+
+        Message::LightStatic => {
+            let outcome = state.client.light(Light::Static {
+                color: format!(
+                    "{:02x}{:02x}{:02x}",
+                    state.color[0], state.color[1], state.color[2]
+                ),
+                brightness: state.brightness,
+            });
+            state.report(outcome);
+        }
+
+        Message::LightEffect(mode) => {
+            let outcome = state.client.light(Light::Effect { mode });
+            state.report(outcome);
+        }
+
+        Message::LightOff => {
+            let outcome = state.client.light(Light::Off);
+            state.report(outcome);
+        }
+
+        Message::IndicatorsToggled(on) => {
+            state.indicators = on;
+            let outcome = state.client.light(Light::Indicators { on });
+            state.report(outcome);
+        }
+
+        Message::StandbySelected(standby) => {
+            if let Some(config) = state.config.as_mut() {
+                config.standby = Some(standby);
+            }
+            let outcome = state.client.set_standby(standby);
+            state.report(outcome);
         }
     }
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let side = column![speed_card(state), manual_card(state), curve_list(state)]
-        .spacing(12)
-        .width(Length::Fixed(300.0));
+    let side = column![
+        speed_card(state),
+        manual_card(state),
+        standby_card(state),
+        curve_list(state)
+    ]
+    .spacing(12)
+    .width(Length::Fixed(300.0));
 
-    let mut screen = column![row![side, editor_pane(state)].spacing(12)]
+    let pane = match state.tab {
+        Tab::Curve => editor_pane(state),
+        Tab::Gears => gears_pane(state),
+        Tab::Light => light_pane(state),
+    };
+
+    let right = column![tabs(state), pane].spacing(10).width(Length::Fill);
+
+    let mut screen = column![row![side, right].spacing(12)]
         .spacing(10)
         .padding(12);
 
@@ -478,6 +622,156 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
                 .size(12),
         ]
         .spacing(8)
+        .into(),
+    )
+}
+
+fn tabs(state: &State) -> Element<'_, Message> {
+    let tab = |label: &'static str, which: Tab| {
+        button(text(label))
+            .style(if state.tab == which {
+                button::primary
+            } else {
+                button::secondary
+            })
+            .on_press(Message::TabSelected(which))
+    };
+
+    row![
+        tab("Curve", Tab::Curve),
+        tab("Gears", Tab::Gears),
+        tab("Light", Tab::Light),
+    ]
+    .spacing(6)
+    .into()
+}
+
+fn standby_card(state: &State) -> Element<'_, Message> {
+    let current = state.config.as_ref().and_then(|config| config.standby);
+
+    card(
+        column![
+            text("When the host goes away").size(14),
+            pick_list(
+                [Standby::Off, Standby::Instant, Standby::Delayed],
+                current,
+                Message::StandbySelected
+            )
+            .width(Length::Fill),
+            text("Stored in the cooler, so it still applies once this machine is off").size(11),
+        ]
+        .spacing(6)
+        .into(),
+    )
+}
+
+fn gears_pane(state: &State) -> Element<'_, Message> {
+    if state.gears.is_empty() {
+        return card(
+            column![
+                text("No gear table").size(15),
+                text("The cooler answers this one itself, so it has to be connected").size(12),
+                button(text("Retry")).on_press(Message::TabSelected(Tab::Gears)),
+            ]
+            .spacing(8)
+            .into(),
+        );
+    }
+
+    let ceiling = state.ceiling();
+    let mut list =
+        column![
+        text("Speeds stored in the cooler").size(16),
+        text("These are what the button on the cooler cycles through, and they survive a reconnect")
+            .size(12),
+    ]
+        .spacing(6);
+
+    for (index, gear) in state.gears.iter().enumerate() {
+        let note = if gear.allowed {
+            String::new()
+        } else {
+            "  needs more power".to_string()
+        };
+
+        list = list.push(
+            column![
+                row![
+                    text(format!("{}{note}", gear.name)).width(Length::Fill),
+                    text(format!("{} rpm", gear.rpm)),
+                ],
+                slider(MIN_RPM..=ceiling, gear.rpm.min(ceiling), move |rpm| {
+                    Message::GearMoved { index, rpm }
+                })
+                .step(50u16)
+                .on_release(Message::GearCommitted(index)),
+            ]
+            .spacing(4),
+        );
+    }
+
+    card(scrollable(list.spacing(14)).height(Length::Fill).into())
+}
+
+fn light_pane(state: &State) -> Element<'_, Message> {
+    let channel = |label: &'static str, which: Channel, value: u8| {
+        row![
+            text(label).width(Length::Fixed(90.0)),
+            slider(0u8..=255, value, move |value| Message::ColorChanged {
+                channel: which,
+                value
+            })
+            .width(Length::Fill),
+            text(format!("{value:3}")).width(Length::Fixed(40.0)),
+        ]
+        .spacing(8)
+    };
+
+    let mut effects = row![text("Built in").width(Length::Fixed(90.0))].spacing(6);
+    for mode in 1..=EFFECT_COUNT {
+        effects = effects.push(
+            button(text(mode.to_string()))
+                .style(button::secondary)
+                .on_press(Message::LightEffect(mode)),
+        );
+    }
+
+    card(
+        column![
+            text("Side strip").size(16),
+            channel("Red", Channel::Red, state.color[0]),
+            channel("Green", Channel::Green, state.color[1]),
+            channel("Blue", Channel::Blue, state.color[2]),
+            row![
+                text("Brightness").width(Length::Fixed(90.0)),
+                slider(0u8..=100, state.brightness, |value| {
+                    Message::ColorChanged {
+                        channel: Channel::Brightness,
+                        value,
+                    }
+                })
+                .width(Length::Fill),
+                text(format!("{:3}%", state.brightness)).width(Length::Fixed(40.0)),
+            ]
+            .spacing(8),
+            row![
+                button(text("Apply colour")).on_press(Message::LightStatic),
+                button(text("Off"))
+                    .style(button::secondary)
+                    .on_press(Message::LightOff),
+            ]
+            .spacing(8),
+            effects,
+            text(
+                "Effects are uploaded as their own animation rather than selected by number, \
+                 because the firmware drops a numbered one the moment the fan leaves realtime"
+            )
+            .size(11),
+            checkbox(state.indicators)
+                .label("Gear indicator LEDs")
+                .on_toggle(Message::IndicatorsToggled),
+        ]
+        .spacing(10)
         .into(),
     )
 }

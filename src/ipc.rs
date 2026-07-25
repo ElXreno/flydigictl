@@ -28,12 +28,37 @@ pub enum Request {
     SetConfig { config: Config },
     /// Hold a fixed speed; `null` returns to the curve.
     SetManual { rpm: Option<u16> },
+    /// The four speeds stored in the cooler.
+    Gears,
+    /// Rewrite one of them. Named rather than numbered so a client does not
+    /// have to know the order the firmware keeps them in.
+    SetGear { gear: String, rpm: u16 },
+    /// Drive the lighting.
+    Light { light: Light },
+    /// What the cooler should do on its own once the host goes away.
+    SetStandby { standby: crate::protocol::Standby },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "light", rename_all = "snake_case")]
+pub enum Light {
+    /// Turn the side strip off.
+    Off,
+    /// Paint it a single colour, `rrggbb` with or without a leading hash.
+    Static { color: String, brightness: u8 },
+    /// Play one of the firmware's own animations, 1 to 5.
+    Effect { mode: u8 },
+    /// The gear indicator LEDs, which are a separate light entirely.
+    Indicators { on: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Reply {
     Status(Status),
+    Gears {
+        gears: Vec<Gear>,
+    },
     Config {
         config: Config,
         /// False when the daemon cannot persist changes, e.g. a NixOS store path.
@@ -46,6 +71,16 @@ pub enum Reply {
     Error {
         message: String,
     },
+}
+
+/// One stored gear speed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gear {
+    pub name: String,
+    pub rpm: u16,
+    /// False when the supply cannot carry this gear, so the cooler stores the
+    /// speed but refuses to run it.
+    pub allowed: bool,
 }
 
 /// A warning carries a stable code alongside its text.
