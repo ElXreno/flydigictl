@@ -73,6 +73,7 @@ blink.
           flydigictl.nixosModules.default
           {
             programs.flydigictl.enable = true;
+            programs.flydigictl.gui.enable = true;
           }
         ];
       };
@@ -81,7 +82,25 @@ blink.
 ```
 
 The module installs the binary and the udev rules that grant your session
-access to the cooler.
+access to the cooler. `gui.enable` adds the desktop interface, which is built
+as a separate package: it drags in wgpu and a windowing stack that a headless
+install has no use for.
+
+The interface takes its colours from `~/.config/flydigictl/theme.toml`, falling
+back to `/etc/flydigictl/theme.toml` and then to a built-in theme. Six keys,
+each an `rrggbb`:
+
+```toml
+background = "#24273a"
+text = "#cad3f5"
+primary = "#8aadf4"
+success = "#a6da95"
+warning = "#eed49f"
+danger = "#ed8796"
+```
+
+That is a file rather than an option so a scheme generator like Stylix can
+write it, instead of the window insisting on colours of its own.
 
 ### Other distributions
 
@@ -218,6 +237,15 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | `{"request":"get_config"}` | config in force, plus whether it can be saved |
 | `{"request":"set_config","config":{...}}` | replace the config |
 | `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curves |
+| `{"request":"gears"}` | the four speeds stored in the cooler, and whether the supply allows each |
+| `{"request":"set_gear","gear":"quiet","rpm":1500}` | rewrite one of them |
+| `{"request":"light","light":{"light":"effect","mode":3}}` | lighting: `off`, `static`, `effect`, `indicators` |
+| `{"request":"set_standby","standby":"delayed"}` | what the cooler does once the host goes away |
+
+Everything below `set_manual` reaches the cooler through the daemon rather than
+around it: it owns the device, and a second process writing to the same hidraw
+node would have its acknowledgements stolen. That is also why the interface
+ships no device access of its own.
 
 A subscription is the way to follow the cooler rather than interrogate it: the
 daemon writes a status whenever its picture changes, which is twice a second

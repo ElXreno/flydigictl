@@ -31,6 +31,9 @@ const SILENCE: Duration = Duration::from_secs(3);
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// Lighting reports sent back to back are dropped by the cooler.
+const LIGHT_GAP: Duration = Duration::from_millis(5);
+
 /// Run a fan curve against a Flydigi BS series cooler
 #[derive(argh::FromArgs)]
 struct Args {
@@ -525,6 +528,53 @@ fn control_loop(
                             }
                         }
                     },
+
+                    Request::Gears => match device.as_mut() {
+                        None => Reply::Error {
+                            message: "no cooler".to_string(),
+                        },
+                        Some(dev) => read_gears(dev, supply),
+                    },
+
+                    Request::SetGear { gear, rpm } => match device.as_mut() {
+                        None => Reply::Error {
+                            message: "no cooler".to_string(),
+                        },
+                        Some(dev) => set_gear(dev, supply, &gear, rpm),
+                    },
+
+                    Request::Light { light } => match device.as_mut() {
+                        None => Reply::Error {
+                            message: "no cooler".to_string(),
+                        },
+                        Some(dev) => match light_reports(&light) {
+                            Err(message) => Reply::Error { message },
+                            Ok(reports) => send_all(dev, reports),
+                        },
+                    },
+
+                    // Stored in the cooler, but also in the config so that a
+                    // cooler met for the first time is set up the same way.
+                    Request::SetStandby { standby } => {
+                        config.standby = Some(standby);
+
+                        match device.as_mut() {
+                            None => Reply::Error {
+                                message: "no cooler".to_string(),
+                            },
+                            Some(dev) => {
+                                match dev.send_acked(protocol::set_standby(standby), ACK_TIMEOUT) {
+                                    Err(err) => Reply::Error {
+                                        message: err.to_string(),
+                                    },
+                                    Ok(_) => {
+                                        info!("standby set to {standby}");
+                                        persist(config, config_path, writable)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 };
 
                 let _ = reply_tx.send(reply);
@@ -682,6 +732,131 @@ fn control_loop(
     }
 
     Ok(())
+}
+
+fn read_gears(dev: &mut Device, supply: Option<protocol::Supply>) -> Reply {
+    let payload = match dev.query(protocol::query_gear_table(), ACK_TIMEOUT) {
+        Ok(payload) => payload,
+        Err(err) => {
+            return Reply::Error {
+                message: err.to_string(),
+            }
+        }
+    };
+
+    let Some(table) = protocol::parse_gear_table(&payload) else {
+        return Reply::Error {
+            message: "the cooler answered with a gear table it does not have".to_string(),
+        };
+    };
+
+    Reply::Gears {
+        gears: protocol::Gear::ALL
+            .iter()
+            .zip(table)
+            .map(|(gear, rpm)| ipc::Gear {
+                name: gear.to_string(),
+                rpm,
+                allowed: supply.is_none_or(|supply| supply.allows(*gear)),
+            })
+            .collect(),
+    }
+}
+
+fn set_gear(dev: &mut Device, supply: Option<protocol::Supply>, name: &str, rpm: u16) -> Reply {
+    let Ok(gear) = name.parse::<protocol::Gear>() else {
+        return Reply::Error {
+            message: format!("no gear called {name}"),
+        };
+    };
+
+    if !(MIN_RPM..=MAX_RPM).contains(&rpm) {
+        return Reply::Error {
+            message: format!("rpm {rpm} out of range ({MIN_RPM}-{MAX_RPM})"),
+        };
+    }
+
+    let Some(report) = protocol::set_gear_rpm(gear, rpm) else {
+        return Reply::Error {
+            message: format!("no gear called {name}"),
+        };
+    };
+
+    match dev.send_acked(report, ACK_TIMEOUT) {
+        Err(err) => Reply::Error {
+            message: err.to_string(),
+        },
+        Ok(0) => Reply::Error {
+            message: format!("the cooler refused gear {name}"),
+        },
+        Ok(_) => {
+            info!("gear {gear} stored at {rpm} rpm");
+
+            // Storing always works; running the gear is what a weak supply
+            // stops, so say which of the two just happened.
+            let warning = supply
+                .filter(|supply| !supply.allows(gear))
+                .map(|supply| Warning {
+                    code: WarningCode::SupplyLimited,
+                    message: format!(
+                        "supply is {supply}, so this gear will not run until it improves"
+                    ),
+                });
+
+            Reply::Ok { warning }
+        }
+    }
+}
+
+fn light_reports(light: &ipc::Light) -> Result<Vec<[u8; protocol::REPORT_LEN]>, String> {
+    match light {
+        ipc::Light::Off => Ok(vec![protocol::light_off()]),
+
+        ipc::Light::Indicators { on } => Ok(vec![protocol::gear_light(*on)]),
+
+        ipc::Light::Effect { mode } => {
+            if *mode == 0 || *mode > protocol::EFFECT_COUNT {
+                return Err(format!(
+                    "no effect {mode}, the firmware has 1-{}",
+                    protocol::EFFECT_COUNT
+                ));
+            }
+            Ok(protocol::light_effect(*mode))
+        }
+
+        ipc::Light::Static { color, brightness } => {
+            let hex = color.strip_prefix('#').unwrap_or(color);
+            if hex.len() != 6 {
+                return Err(format!("bad colour: {color}"));
+            }
+
+            let byte = |range: std::ops::Range<usize>| {
+                u8::from_str_radix(&hex[range], 16).map_err(|_| format!("bad colour: {color}"))
+            };
+
+            let color = protocol::Rgb {
+                r: byte(0..2)?,
+                g: byte(2..4)?,
+                b: byte(4..6)?,
+            };
+            Ok(protocol::light_static(color, *brightness))
+        }
+    }
+}
+
+/// Lighting arrives as a burst of reports, and the cooler drops the ones that
+/// come too close together.
+fn send_all(dev: &mut Device, reports: Vec<[u8; protocol::REPORT_LEN]>) -> Reply {
+    for report in reports {
+        if let Err(err) = dev.send_acked(report, ACK_TIMEOUT) {
+            return Reply::Error {
+                message: err.to_string(),
+            };
+        }
+        std::thread::sleep(LIGHT_GAP);
+    }
+
+    Reply::Ok { warning: None }
 }
 
 /// Ask the cooler how much power it has, tolerating a device that does not know
