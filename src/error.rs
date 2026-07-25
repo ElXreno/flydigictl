@@ -34,6 +34,14 @@ pub enum Error {
     #[error("bad colour: {0}")]
     BadColor(String),
 
+    #[error("no effect {mode}, firmware has 0-{max}")]
+    UnknownEffect { mode: u8, max: u8 },
+
+    #[error(
+        "built-in effects need realtime mode, set a speed first"
+    )]
+    NeedsRealtime,
+
     #[error("expected on or off, got {0}")]
     BadArgument(String),
 
