@@ -42,6 +42,13 @@ That length is not negotiable. THRM pads lighting commands to 65 bytes, and a
 BS3 Pro drops those on the floor - no effect, no error, no reply. The same
 command in a 25-byte report works.
 
+The frame inside the report cannot exceed 20 bytes either, which caps a payload
+at 15. The boundary was measured on `0x42`, `0x47` and `0x27` alike: 15 bytes
+are answered, 16 are met with silence, and nothing in the firmware's own
+validation, queueing or dispatch path explains it. Twenty bytes is exactly what
+a Bluetooth LE write carries at the default ATT MTU, so anything past that is
+being dropped before the firmware ever sees it.
+
 Commands are acknowledged with `01 5A A5 <cmd> 03 01 <checksum>`, so a missing
 reply means the device did not accept the report at all. Verified both ways: a
 made-up command (`0x7E`) and a 65-byte report both go unanswered, while every
@@ -107,8 +114,8 @@ the target on every tick, and pins the cooler in an override it never leaves.
 | `0x23` | Enter realtime mode | none               | yes      |
 | `0x24` | Exit realtime mode  | none               | yes      |
 | `0x26` | Set gear RPM        | gear, RPM LE       | yes      |
-| `0x41` | Effect upload init  | none               | no       |
-| `0x42` | Effect block write  | data               | no       |
+| `0x41` | Effect upload begin | none               | yes      |
+| `0x42` | Effect upload block | data, 15 bytes max | yes      |
 | `0x43` | Play user buffer    | `01`               | yes      |
 | `0x44` | Select effect       | mode `00`-`05`     | yes      |
 | `0x45` | Select strip        | none, then `01`    | yes      |
@@ -216,6 +223,29 @@ nothing has been uploaded.
 Frame indices are limited: `0x00` is the header, `0x01`-`0x11` carry 10 bytes,
 `0x12` carries 6, and higher indices are acknowledged but discarded. The vendor
 app uploads 30 frames; everything past `0x12` never reaches the strip.
+
+### Streaming the buffer with `0x41` and `0x42`
+
+`0x47` addresses one step per report. The same 186 bytes can be streamed
+instead, which is what `0x41` and `0x42` are for:
+
+| Step   | Effect |
+|--------|--------|
+| `0x41` | rewind the write cursor and arm the upload |
+| `0x42` | append the payload at the cursor and advance it |
+| `0x43` | persist and select the buffer |
+
+`0x42` carries nothing but data - no index, no offset - because the dispatcher
+hands the handler a pointer to the payload and its length instead of copying
+values inline the way it does for the fan commands. The destination is bounds
+checked against a 256-byte buffer, and a block that would overrun it is dropped
+without an acknowledgement, as is any block sent before `0x41` arms the upload.
+Silence is the only rejection signal.
+
+With payloads capped at 15 bytes the whole animation takes 13 blocks against 19
+addressed writes. `0x43` then writes it to flash at offset `0x2000` behind a
+`2BGR` magic, so an uploaded animation survives a power cut - unlike a preset
+selected with `0x44`.
 
 ### Presets cannot be left running
 
