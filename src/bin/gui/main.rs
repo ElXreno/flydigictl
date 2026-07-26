@@ -4,6 +4,7 @@ mod client;
 mod editor;
 mod palette;
 mod picker;
+mod spinner;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -311,6 +312,9 @@ struct State {
     /// so a change made while one is out replaces it instead of following it.
     lighting_out: bool,
     lighting_again: bool,
+
+    /// When the queue last went from empty to busy, for the turning arc.
+    working_since: Option<std::time::Instant>,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
     name_draft: Option<String>,
@@ -341,6 +345,7 @@ impl State {
             pending: 0,
             lighting_out: false,
             lighting_again: false,
+            working_since: None,
         };
 
         let opening = Task::batch([state.reload(), state.load_sensors()]);
@@ -358,6 +363,10 @@ impl State {
         work: impl FnOnce() -> T + Send + 'static,
         answer: impl FnOnce(T) -> Answer + Send + 'static,
     ) -> Task<Message> {
+        if self.pending == 0 {
+            self.working_since = Some(std::time::Instant::now());
+        }
+
         self.pending += 1;
         offload(work, answer)
     }
@@ -482,8 +491,8 @@ fn theme(state: &State) -> Option<Theme> {
 fn subscription(state: &State) -> Subscription<Message> {
     let updates = Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates);
 
-    // Frames are only worth asking for while a note is counting itself down.
-    if state.note.is_some() {
+    // Frames are only worth asking for while something is moving.
+    if state.note.is_some() || state.busy() {
         Subscription::batch([updates, iced::window::frames().map(|_| Message::Ticked)])
     } else {
         updates
@@ -560,6 +569,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Done(answer) => {
             state.pending = state.pending.saturating_sub(1);
+
+            if state.pending == 0 {
+                state.working_since = None;
+            }
 
             match *answer {
                 Answer::Acked(outcome) => state.report(outcome),
@@ -1179,13 +1192,29 @@ fn tabs(state: &State) -> Element<'_, Message> {
         )
     };
 
-    row![
+    let mut bar = row![
         tab("Curve", Tab::Curve),
         tab("Gears", Tab::Gears),
         tab("Light", Tab::Light),
     ]
     .spacing(6)
-    .into()
+    .align_y(iced::Alignment::Center);
+
+    if let Some(since) = state.working_since {
+        bar = bar.push(
+            container(
+                canvas(spinner::Spinner {
+                    elapsed: since.elapsed().as_secs_f32(),
+                })
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(16.0)),
+            )
+            .width(Length::Fill)
+            .align_right(Length::Fill),
+        );
+    }
+
+    bar.into()
 }
 
 fn standby_card(state: &State) -> Element<'_, Message> {
