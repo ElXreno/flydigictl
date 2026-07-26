@@ -53,6 +53,11 @@ in
           interval_secs = 3;
           hysteresis_rpm = 100;
           standby = "delayed";
+          lighting = {
+            mode = { mode = "effect"; effect = 3; };
+            brightness = 60;
+            indicators = true;
+          };
           curves = [
             {
               name = "ram";
@@ -72,7 +77,9 @@ in
 
         Because this is generated into the store it is read-only: the daemon
         still accepts changes over its socket and applies them immediately, but
-        logs a warning that they are lost on restart.
+        they last only as long as it runs. Anything that should come back after
+        a restart belongs here, `lighting` included - nothing can be read back
+        out of the cooler, so what is not declared is not known.
       '';
     };
   };

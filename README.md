@@ -270,6 +270,25 @@ Warnings carry a stable `code` alongside their text, so a client that shows each
 one once can dedupe on that rather than on the message, which names a config
 path that changes on every rebuild.
 
+### Lighting
+
+Nothing in the cooler reports what the strip is playing, so the daemon knows
+only what it was told. Changes over the socket last as long as it runs; declare
+them in the config to have them restored on every connection:
+
+```toml
+[lighting]
+brightness = 60
+indicators = true
+
+[lighting.mode]
+mode = "effect"   # or "off", or "static" with a colour
+effect = 3
+```
+
+Brightness applies to animations as well as to a plain colour: it is the same
+header byte either way, so dimming an effect keeps it running.
+
 ### Standby
 
 ```console
