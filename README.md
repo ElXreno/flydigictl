@@ -86,21 +86,9 @@ access to the cooler. `gui.enable` adds the desktop interface, which is built
 as a separate package: it drags in wgpu and a windowing stack that a headless
 install has no use for.
 
-The interface takes its colours from `~/.config/flydigictl/theme.toml`, falling
-back to `/etc/flydigictl/theme.toml` and then to a built-in theme. Six keys,
-each an `rrggbb`:
-
-```toml
-background = "#24273a"
-text = "#cad3f5"
-primary = "#8aadf4"
-success = "#a6da95"
-warning = "#eed49f"
-danger = "#ed8796"
-```
-
-That is a file rather than an option so a scheme generator like Stylix can
-write it, instead of the window insisting on colours of its own.
+The interface follows the desktop's light or dark preference and otherwise
+themes itself, the same as any other application that is not built on GTK or
+Qt. Nothing to configure.
 
 ### Other distributions
 

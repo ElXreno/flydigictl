@@ -3,7 +3,6 @@
 mod client;
 mod editor;
 mod picker;
-mod theme;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -257,7 +256,6 @@ struct State {
     /// warning that was still true.
     note: Option<String>,
 
-    theme: Theme,
     tab: Tab,
 
     /// Read from the cooler rather than from the config: the gear table lives
@@ -290,7 +288,6 @@ impl State {
             writable: false,
             selected: 0,
             note: None,
-            theme: theme::load(),
             tab: Tab::Curve,
             gears: Vec::new(),
             light: Lighting::default(),
@@ -395,8 +392,13 @@ fn title(state: &State) -> String {
     }
 }
 
-fn theme(state: &State) -> Theme {
-    state.theme.clone()
+/// Left to iced, which follows the desktop's light or dark preference.
+///
+/// Returning `None` is how that is asked for. An interface that insisted on
+/// colours of its own would look imported from another machine, and reading
+/// them from a file would only work on the one distribution that writes it.
+fn theme(_state: &State) -> Option<Theme> {
+    None
 }
 
 /// Updates arrive when the cooler has something to say, not on a timer.
