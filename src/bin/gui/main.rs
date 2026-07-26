@@ -166,13 +166,16 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
         }
     };
 
+    // Whole-name entries first: they leave the device empty, which matches
+    // every chip of that name and takes the hottest reading among them. That
+    // is what one curve over a pair of DIMMs or a pair of drives wants, and
+    // what a config written by hand usually says.
     for entry in sensors {
-        // Every chip of this name at once, hottest input wins. This is what a
-        // pair of memory sticks wants, and dropping it was what made a curve
-        // written that way look like it pointed at nothing.
+        let all = ambiguous.contains(&entry.hwmon);
+
         push(
             SensorChoice {
-                label: if ambiguous.contains(&entry.hwmon) {
+                label: if all {
                     format!("{} (all, hottest)", entry.hwmon)
                 } else {
                     format!("{} (hottest)", entry.hwmon)
@@ -186,19 +189,45 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
             &mut choices,
         );
 
-        if ambiguous.contains(&entry.hwmon) {
+        if !entry.label.is_empty() {
             push(
                 SensorChoice {
-                    label: format!("{} (hottest)", named(entry)),
+                    label: if all {
+                        format!("{} (all)/{}", entry.hwmon, entry.label)
+                    } else {
+                        format!(
+                            "{}/{}{}",
+                            entry.hwmon,
+                            entry.label,
+                            entry
+                                .temp_c
+                                .map_or(String::new(), |temp| format!("  {temp} C"))
+                        )
+                    },
                     sensor: Sensor {
                         hwmon: entry.hwmon.clone(),
-                        device: entry.device.clone(),
-                        label: String::new(),
+                        device: String::new(),
+                        label: entry.label.clone(),
                     },
                 },
                 &mut choices,
             );
         }
+    }
+
+    // Then one chip at a time, for picking out a particular drive or stick.
+    for entry in sensors.iter().filter(|e| ambiguous.contains(&e.hwmon)) {
+        push(
+            SensorChoice {
+                label: format!("{} (hottest)", named(entry)),
+                sensor: Sensor {
+                    hwmon: entry.hwmon.clone(),
+                    device: entry.device.clone(),
+                    label: String::new(),
+                },
+            },
+            &mut choices,
+        );
 
         if !entry.label.is_empty() {
             push(
@@ -213,11 +242,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
                     ),
                     sensor: Sensor {
                         hwmon: entry.hwmon.clone(),
-                        device: if ambiguous.contains(&entry.hwmon) {
-                            entry.device.clone()
-                        } else {
-                            String::new()
-                        },
+                        device: entry.device.clone(),
                         label: entry.label.clone(),
                     },
                 },
