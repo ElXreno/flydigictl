@@ -112,7 +112,8 @@ impl Status {
             manual: false,
             supply: None,
             supply_max_rpm: None,
-            lighting: crate::protocol::Lighting::default(),
+            lighting: None,
+            strip_on: None,
             leading: None,
             demands: Vec::new(),
         }
@@ -135,9 +136,15 @@ pub struct Status {
     /// firmware, so a client showing the curve should show this line too.
     pub supply_max_rpm: Option<u16>,
 
-    /// What the daemon last told the lighting to do, which is the only record
-    /// of it that exists.
-    pub lighting: crate::protocol::Lighting,
+    /// What the daemon last told the lighting to do.
+    ///
+    /// `None` when it has told it nothing yet: the cooler cannot be asked what
+    /// pattern it is showing, so an interface should say it does not know
+    /// rather than draw a guess.
+    pub lighting: Option<crate::protocol::Lighting>,
+
+    /// Whether the strip is lit, which the cooler *will* answer.
+    pub strip_on: Option<bool>,
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,

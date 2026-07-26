@@ -353,9 +353,11 @@ fn update(state: &mut State, message: Message) {
             // The cooler cannot be asked what it is showing, so the daemon's
             // record is the only starting point the controls have.
             if state.status.is_none() {
-                state.light = status.lighting;
-                if let LightMode::Static { color } = status.lighting.mode {
-                    state.picked = Hsv::from_rgb(color);
+                if let Some(lighting) = status.lighting {
+                    state.light = lighting;
+                    if let LightMode::Static { color } = lighting.mode {
+                        state.picked = Hsv::from_rgb(color);
+                    }
                 }
             }
             state.status = Some(*status);
@@ -932,20 +934,26 @@ fn gears_pane(state: &State) -> Element<'_, Message> {
 }
 
 fn light_pane(state: &State) -> Element<'_, Message> {
-    let showing = state
-        .status
-        .as_ref()
-        .map(|status| status.lighting)
-        .unwrap_or_default();
+    let showing = state.status.as_ref().and_then(|status| status.lighting);
+    let strip_on = state.status.as_ref().and_then(|status| status.strip_on);
 
     let mode = |label: String, which: LightMode| {
         button(text(label))
-            .style(if showing.mode == which {
+            .style(if showing.is_some_and(|showing| showing.mode == which) {
                 button::primary
             } else {
                 button::secondary
             })
             .on_press(Message::ModePicked(which))
+    };
+
+    // Nothing can be asked what pattern the strip is playing, so when the
+    // daemon has not set one this session, say that instead of inventing it.
+    let state_line = match (showing, strip_on) {
+        (Some(showing), _) => format!("showing {showing}"),
+        (None, Some(true)) => "lit, pattern set before this session".to_string(),
+        (None, Some(false)) => "strip is off".to_string(),
+        (None, None) => "unknown".to_string(),
     };
 
     let mut effects = row![text("Animations").width(Length::Fixed(90.0))]
@@ -967,7 +975,7 @@ fn light_pane(state: &State) -> Element<'_, Message> {
         column![
             row![
                 text("Side strip").size(16).width(Length::Fill),
-                text(format!("showing {showing}")).size(13),
+                text(state_line).size(13),
             ],
             row![
                 canvas(picker::Shades { hsv: state.picked })

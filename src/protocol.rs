@@ -28,7 +28,7 @@ pub const CMD_QUERY_GEAR_TABLE: u8 = 0x27;
 pub const CMD_LIGHT_UPLOAD_BEGIN: u8 = 0x41;
 pub const CMD_LIGHT_UPLOAD_BLOCK: u8 = 0x42;
 pub const CMD_LIGHT_APPLY: u8 = 0x43;
-pub const CMD_LIGHT_SELECT: u8 = 0x45;
+pub const CMD_QUERY_STRIP: u8 = 0x45;
 pub const CMD_LIGHT_POWER: u8 = 0x46;
 pub const CMD_LIGHT_FRAME: u8 = 0x47;
 pub const CMD_GEAR_LIGHT: u8 = 0x48;
@@ -297,8 +297,12 @@ impl std::fmt::Display for Supply {
 pub enum LightMode {
     #[default]
     Off,
-    Static { color: Rgb },
-    Effect { effect: u8 },
+    Static {
+        color: Rgb,
+    },
+    Effect {
+        effect: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -366,6 +370,15 @@ impl Lighting {
 
         reports
     }
+}
+
+/// Ask whether the side strip is powered.
+///
+/// The one piece of lighting the cooler will admit to. THRM sends `0x45` as if
+/// it selected something, but the handler ignores its payload entirely and only
+/// ever answers with the stored flag, so those reports did nothing.
+pub fn query_strip() -> [u8; REPORT_LEN] {
+    build_report(CMD_QUERY_STRIP, &[])
 }
 
 /// Ask how much power the cooler thinks it has.
@@ -640,8 +653,6 @@ fn preset_buffer(effect: u8, brightness: u8) -> [u8; BUFFER_LEN] {
 fn light_upload(buf: &[u8]) -> Vec<[u8; REPORT_LEN]> {
     let mut reports = vec![
         build_report(CMD_LIGHT_POWER, &[0x01]),
-        build_report(CMD_LIGHT_SELECT, &[]),
-        build_report(CMD_LIGHT_SELECT, &[0x01]),
         build_report(CMD_LIGHT_UPLOAD_BEGIN, &[]),
     ];
 
