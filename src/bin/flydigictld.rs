@@ -544,6 +544,17 @@ fn control_loop(
                         }
                     },
 
+                    Request::Sensors => Reply::Sensors {
+                        sensors: sensor::list()
+                            .into_iter()
+                            .map(|entry| ipc::SensorInfo {
+                                hwmon: entry.hwmon,
+                                label: entry.label,
+                                temp_c: sensor::read(&entry.path),
+                            })
+                            .collect(),
+                    },
+
                     Request::Gears => match device.as_mut() {
                         None => Reply::Error {
                             message: "no cooler".to_string(),

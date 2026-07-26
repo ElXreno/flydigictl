@@ -150,8 +150,14 @@ in
           ProtectKernelModules = true;
           ProtectControlGroups = true;
           PrivateTmp = true;
-          PrivateNetwork = true;
           NoNewPrivileges = true;
+
+          # This alone stops the daemon opening anything but a unix socket.
+          #
+          # PrivateNetwork would add almost nothing on top of it and costs a
+          # whole class of sensors: sysfs is tagged by network namespace, so a
+          # private one hides every hwmon that hangs off a network device -
+          # a Wi-Fi card's temperature among them.
           RestrictAddressFamilies = [ "AF_UNIX" ];
           RestrictNamespaces = true;
           RestrictRealtime = true;

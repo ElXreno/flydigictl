@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flydigictl::config::Config;
-use flydigictl::ipc::{Gear, Reply, Request, Status, Warning};
+use flydigictl::ipc::{Gear, Reply, Request, SensorInfo, Status, Warning};
 use flydigictl::protocol::{Lighting, Standby};
 
 /// Long enough for a daemon busy talking to the cooler, short enough that a
@@ -68,6 +68,13 @@ impl Client {
 
     pub fn set_manual(&self, rpm: Option<u16>) -> Result<Option<Warning>, String> {
         self.acknowledged(&Request::SetManual { rpm })
+    }
+
+    pub fn sensors(&self) -> Result<Vec<SensorInfo>, String> {
+        match self.request(&Request::Sensors)? {
+            Reply::Sensors { sensors } => Ok(sensors),
+            other => Err(unexpected(&other)),
+        }
     }
 
     pub fn gears(&self) -> Result<Vec<Gear>, String> {
