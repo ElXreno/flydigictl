@@ -31,6 +31,9 @@ const RECONNECT: Duration = Duration::from_secs(1);
 /// How long a note stays up before it takes itself away.
 const NOTE_LIFE: Duration = Duration::from_secs(6);
 
+/// How far back undo reaches.
+const HISTORY: usize = 64;
+
 /// Control a Flydigi BS series cooler
 #[derive(argh::FromArgs)]
 struct Args {
@@ -110,6 +113,8 @@ enum Message {
 
     StandbySelected(Standby),
     ExportConfig,
+    Undo,
+    Redo,
     /// A frame went by, which is how the note knows its time is up.
     Ticked,
 
@@ -315,6 +320,15 @@ struct State {
 
     /// When the queue last went from empty to busy, for the turning arc.
     working_since: Option<std::time::Instant>,
+
+    /// The config as the daemon last had it, and the way back and forward.
+    ///
+    /// Snapshots are taken when a change is sent rather than as it is made:
+    /// dragging a point produces a message per pixel, and undo should return
+    /// to where the point was before the drag, not to halfway through it.
+    committed: Option<Config>,
+    history: Vec<Config>,
+    future: Vec<Config>,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
     name_draft: Option<String>,
@@ -346,6 +360,9 @@ impl State {
             lighting_out: false,
             lighting_again: false,
             working_since: None,
+            committed: None,
+            history: Vec::new(),
+            future: Vec::new(),
         };
 
         let opening = Task::batch([state.reload(), state.load_sensors()]);
@@ -393,8 +410,50 @@ impl State {
             return Task::none();
         };
 
+        if let Some(previous) = self.committed.replace(config.clone()) {
+            if previous != config {
+                self.history.push(previous);
+
+                // Far more than anyone reaches for, and bounded so a long
+                // session of dragging does not grow without end.
+                if self.history.len() > HISTORY {
+                    self.history.remove(0);
+                }
+
+                self.future.clear();
+            }
+        }
+
+        self.send(config)
+    }
+
+    /// Send a config without touching the history, which undo needs.
+    fn send(&mut self, config: Config) -> Task<Message> {
         let client = self.client.clone();
         self.ask(move || client.set_config(config), Answer::Acked)
+    }
+
+    fn step(&mut self, back: bool) -> Task<Message> {
+        let (from, to) = if back {
+            (&mut self.history, &mut self.future)
+        } else {
+            (&mut self.future, &mut self.history)
+        };
+
+        let Some(config) = from.pop() else {
+            return Task::none();
+        };
+
+        if let Some(current) = self.config.take() {
+            to.push(current);
+        }
+
+        self.selected = self.selected.min(config.curves.len().saturating_sub(1));
+        self.name_draft = None;
+        self.committed = Some(config.clone());
+        self.config = Some(config.clone());
+
+        self.send(config)
     }
 
     /// Send the draft as it stands. The daemon works out which reports that
@@ -490,12 +549,36 @@ fn theme(state: &State) -> Option<Theme> {
 /// path means it restarts by itself if that ever changes.
 fn subscription(state: &State) -> Subscription<Message> {
     let updates = Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates);
+    let keys = iced::keyboard::listen().filter_map(shortcut);
+    let updates = Subscription::batch([updates, keys]);
 
     // Frames are only worth asking for while something is moving.
     if state.note.is_some() || state.busy() {
         Subscription::batch([updates, iced::window::frames().map(|_| Message::Ticked)])
     } else {
         updates
+    }
+}
+
+/// Ctrl+Z and its two usual spellings of redo.
+fn shortcut(event: iced::keyboard::Event) -> Option<Message> {
+    use iced::keyboard::{key::Named, Event, Key};
+
+    let Event::KeyPressed { key, modifiers, .. } = event else {
+        return None;
+    };
+
+    if !modifiers.command() {
+        return None;
+    }
+
+    match key.as_ref() {
+        Key::Character("z") if modifiers.shift() => Some(Message::Redo),
+        Key::Character("z") => Some(Message::Undo),
+        Key::Character("y") => Some(Message::Redo),
+        Key::Named(Named::Undo) => Some(Message::Undo),
+        Key::Named(Named::Redo) => Some(Message::Redo),
+        _ => None,
     }
 }
 
@@ -589,6 +672,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 Answer::Config(Ok((config, writable))) => {
                     state.selected = state.selected.min(config.curves.len().saturating_sub(1));
+                    state.committed = Some(config.clone());
                     state.config = Some(config);
                     state.writable = writable;
                 }
@@ -895,6 +979,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
 
+        Message::Undo => state.step(true),
+
+        Message::Redo => state.step(false),
+
         Message::Ticked => {
             if state.note.as_ref().is_some_and(|note| note.left() <= 0.0) {
                 state.note = None;
@@ -1041,13 +1129,21 @@ fn curve_list(state: &State) -> Element<'_, Message> {
         return card(text("No config").size(14).into());
     };
 
-    let mut list = column![row![
-        text("Curves").size(15).width(Length::Fill),
-        action("Export", button::secondary, Message::ExportConfig),
-        action("Add", button::secondary, Message::CurveAdded),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)]
+    let mut heading = row![text("Curves").size(15).width(Length::Fill)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+    if !state.history.is_empty() {
+        heading = heading.push(action("Undo", button::secondary, Message::Undo));
+    }
+
+    if !state.future.is_empty() {
+        heading = heading.push(action("Redo", button::secondary, Message::Redo));
+    }
+
+    let mut list = column![heading
+        .push(action("Export", button::secondary, Message::ExportConfig))
+        .push(action("Add", button::secondary, Message::CurveAdded))]
     .spacing(6);
 
     for (index, curve) in config.curves.iter().enumerate() {

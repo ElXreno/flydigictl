@@ -341,6 +341,17 @@ effect = 3
 Brightness applies to animations as well as to a plain colour: it is the same
 header byte either way, so dimming an effect keeps it running.
 
+### Undoing
+
+Every change the interface sends is a snapshot, so `Ctrl+Z` walks back through
+them and `Ctrl+Shift+Z` or `Ctrl+Y` walks forward again. Snapshots are taken
+when a change goes out rather than while it is being made: dragging a point
+produces one, not one per pixel.
+
+Only the configuration is remembered this way. Lighting and a held speed are
+not: the cooler is showing them, and stepping back through those would mean
+telling it to change again.
+
 ### Exporting
 
 The daemon holds the running configuration, and on NixOS the file behind it is
