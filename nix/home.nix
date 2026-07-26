@@ -9,18 +9,31 @@ let
 
   scheme = if config.lib ? stylix then config.lib.stylix.colors.withHashtag else null;
 
+  # The whole scheme rather than the six roles: given base01 through base03 the
+  # interface shades panels and lines the way the rest of the desktop does,
+  # instead of inventing them from the background.
   fromScheme =
     if scheme == null then
       { }
     else
-      {
-        background = scheme.base00;
-        text = scheme.base05;
-        primary = scheme.base0D;
-        success = scheme.base0B;
-        warning = scheme.base0A;
-        danger = scheme.base08;
-      };
+      lib.genAttrs (map (index: "base0${index}") [
+        "0"
+        "1"
+        "2"
+        "3"
+        "4"
+        "5"
+        "6"
+        "7"
+        "8"
+        "9"
+        "A"
+        "B"
+        "C"
+        "D"
+        "E"
+        "F"
+      ]) (name: scheme.${name});
 in
 {
   options.programs.flydigictl = {
@@ -53,10 +66,11 @@ in
         setting reaches it: left alone it can only tell whether the system asked
         for light or dark.
 
-        Roles are `background`, `text`, `primary`, `success`, `warning` and
-        `danger`; anything else is ignored. Partial sets are not: the interface
-        wants all six, or it falls back to the light and dark it knows. Set this
-        to `{ }` to keep it that way.
+        Either a base16 scheme, `base00` through `base0F`, or the six roles it
+        uses directly: `background`, `text`, `primary`, `success`, `warning`,
+        `danger`. A scheme is worth more, since `base01` to `base03` also give
+        it the shades for panels and lines. Partial sets are ignored, and `{ }`
+        leaves it following the light and dark preference.
       '';
     };
   };

@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use iced::theme::palette::{Background, Extended, Pair};
 use iced::theme::Palette;
 use iced::{Color, Theme};
 
@@ -69,9 +70,9 @@ pub fn load() -> Option<Theme> {
             continue;
         };
 
-        if let Some(palette) = parse(&text) {
+        if let Some(scheme) = parse(&text) {
             log::info!("colours from {}", path.display());
-            return Some(Theme::custom("system".to_string(), palette));
+            return Some(scheme.theme());
         }
 
         log::warn!("{} is not a palette this understands", path.display());
@@ -80,22 +81,64 @@ pub fn load() -> Option<Theme> {
     None
 }
 
-fn parse(text: &str) -> Option<Palette> {
-    // Roles first: it is the form written for this application specifically,
-    // so it is the one that means what it says.
-    serde_json::from_str::<Roles>(text)
+/// A palette, and the shades to go with it where the file carried enough.
+struct Scheme {
+    palette: Palette,
+    /// base01, base02, base03: what a scheme uses for panels, lines and
+    /// disabled things. iced would otherwise invent them from the background.
+    shades: Option<[Color; 3]>,
+}
+
+impl Scheme {
+    fn theme(self) -> Theme {
+        let Some([weak, neutral, strong]) = self.shades else {
+            return Theme::custom("system".to_string(), self.palette);
+        };
+
+        Theme::custom_with_fn("system".to_string(), self.palette, move |palette| {
+            let text = palette.text;
+            let mut extended = Extended::generate(palette);
+
+            extended.background = Background {
+                base: Pair::new(palette.background, text),
+                weakest: Pair::new(weak, text),
+                weaker: Pair::new(weak, text),
+                weak: Pair::new(weak, text),
+                neutral: Pair::new(neutral, text),
+                strong: Pair::new(strong, text),
+                stronger: Pair::new(strong, text),
+                strongest: Pair::new(strong, text),
+            };
+
+            extended
+        })
+    }
+}
+
+fn parse(text: &str) -> Option<Scheme> {
+    // Base16 first: it carries the shades as well, so it says the most.
+    serde_json::from_str::<Base16>(text)
         .ok()
-        .and_then(Roles::palette)
+        .and_then(Base16::scheme)
+        .or_else(|| {
+            serde_json::from_str::<Roles>(text)
+                .ok()
+                .and_then(Roles::palette)
+                .map(bare)
+        })
         .or_else(|| {
             serde_json::from_str::<Wal>(text)
                 .ok()
                 .and_then(Wal::palette)
+                .map(bare)
         })
-        .or_else(|| {
-            serde_json::from_str::<Base16>(text)
-                .ok()
-                .and_then(Base16::palette)
-        })
+}
+
+fn bare(palette: Palette) -> Scheme {
+    Scheme {
+        palette,
+        shades: None,
+    }
 }
 
 /// The six colours this interface actually uses, named for what they do.
@@ -167,6 +210,9 @@ impl Wal {
 #[allow(non_snake_case)]
 struct Base16 {
     base00: String,
+    base01: String,
+    base02: String,
+    base03: String,
     base05: String,
     base08: String,
     base0A: String,
@@ -175,14 +221,17 @@ struct Base16 {
 }
 
 impl Base16 {
-    fn palette(self) -> Option<Palette> {
-        Some(Palette {
-            background: rgb(&self.base00)?,
-            text: rgb(&self.base05)?,
-            primary: rgb(&self.base0D)?,
-            success: rgb(&self.base0B)?,
-            warning: rgb(&self.base0A)?,
-            danger: rgb(&self.base08)?,
+    fn scheme(self) -> Option<Scheme> {
+        Some(Scheme {
+            palette: Palette {
+                background: rgb(&self.base00)?,
+                text: rgb(&self.base05)?,
+                primary: rgb(&self.base0D)?,
+                success: rgb(&self.base0B)?,
+                warning: rgb(&self.base0A)?,
+                danger: rgb(&self.base08)?,
+            },
+            shades: Some([rgb(&self.base01)?, rgb(&self.base02)?, rgb(&self.base03)?]),
         })
     }
 }
@@ -216,22 +265,35 @@ mod tests {
             }
         }"##;
 
-        let palette = parse(text).unwrap();
-        assert_eq!(palette.background, Color::from_rgb8(0x1F, 0x24, 0x30));
-        assert_eq!(palette.primary, Color::from_rgb8(0x73, 0xD0, 0xFF));
-        assert_eq!(palette.danger, Color::from_rgb8(0xF2, 0x87, 0x79));
+        let scheme = parse(text).unwrap();
+        assert_eq!(
+            scheme.palette.background,
+            Color::from_rgb8(0x1F, 0x24, 0x30)
+        );
+        assert_eq!(scheme.palette.primary, Color::from_rgb8(0x73, 0xD0, 0xFF));
+        assert_eq!(scheme.palette.danger, Color::from_rgb8(0xF2, 0x87, 0x79));
+        assert!(scheme.shades.is_none());
     }
 
     #[test]
-    fn reads_a_base16_scheme() {
+    fn reads_a_base16_scheme_with_its_shades() {
         let text = r##"{
-            "base00": "1f2430", "base05": "cccac2", "base08": "f28779",
+            "base00": "1f2430", "base01": "242936", "base02": "323844",
+            "base03": "707a8c", "base05": "cccac2", "base08": "f28779",
             "base0A": "ffd173", "base0B": "d5ff80", "base0D": "73d0ff"
         }"##;
 
-        let palette = parse(text).unwrap();
-        assert_eq!(palette.text, Color::from_rgb8(0xCC, 0xCA, 0xC2));
-        assert_eq!(palette.success, Color::from_rgb8(0xD5, 0xFF, 0x80));
+        let scheme = parse(text).unwrap();
+        assert_eq!(scheme.palette.text, Color::from_rgb8(0xCC, 0xCA, 0xC2));
+        assert_eq!(scheme.palette.success, Color::from_rgb8(0xD5, 0xFF, 0x80));
+        assert_eq!(
+            scheme.shades,
+            Some([
+                Color::from_rgb8(0x24, 0x29, 0x36),
+                Color::from_rgb8(0x32, 0x38, 0x44),
+                Color::from_rgb8(0x70, 0x7A, 0x8C),
+            ])
+        );
     }
 
     #[test]
@@ -241,9 +303,9 @@ mod tests {
             "success": "#d5ff80", "warning": "#ffd173", "danger": "#f28779"
         }"##;
 
-        let palette = parse(text).unwrap();
-        assert_eq!(palette.primary, Color::from_rgb8(0x73, 0xD0, 0xFF));
-        assert_eq!(palette.warning, Color::from_rgb8(0xFF, 0xD1, 0x73));
+        let scheme = parse(text).unwrap();
+        assert_eq!(scheme.palette.primary, Color::from_rgb8(0x73, 0xD0, 0xFF));
+        assert_eq!(scheme.palette.warning, Color::from_rgb8(0xFF, 0xD1, 0x73));
     }
 
     #[test]
