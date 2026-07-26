@@ -493,7 +493,6 @@ fn control_loop(
 
                         *config = fresh;
                         curves = Curves::build(config);
-                        applied = None;
                     }
                 }
                 Err(err) => warn!("ignoring config change: {err}"),
@@ -518,7 +517,13 @@ fn control_loop(
                             curve.points.sort_by_key(|point| point.temp_c);
                         }
                         curves = Curves::build(config);
-                        applied = None;
+
+                        // Not `applied = None`: the cooler is already holding
+                        // what it was told, and a curve edit that leaves the
+                        // demand where it was needs no word to the device. The
+                        // next evaluation compares and writes only if it moved,
+                        // which is what keeps a burst of edits from costing a
+                        // third of a second of device traffic each.
                         persist(config, config_path, writable)
                     }
 
@@ -531,7 +536,6 @@ fn control_loop(
                         rpm => {
                             manual_rpm = rpm;
                             config.manual_rpm = rpm;
-                            applied = None;
                             let reply = Reply::Ok { warning: None };
 
                             match (rpm, supply) {
@@ -737,7 +741,7 @@ fn control_loop(
                             let drifted = status.mode != protocol::Mode::Realtime;
 
                             if moved || drifted {
-                                match apply(dev, wanted) {
+                                match apply(dev, wanted, status.mode) {
                                     Ok(()) => {
                                         match &leader {
                                             Some(d) => debug!(
@@ -893,10 +897,21 @@ fn read_supply(dev: &mut Device) -> Option<protocol::Supply> {
     }
 }
 
-fn apply(dev: &mut Device, rpm: u16) -> Result<(), Error> {
-    dev.send_acked(protocol::enter_realtime(), ACK_TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(200));
+/// Hold a speed, entering realtime mode first if the cooler is not in it.
+///
+/// Entering costs an acknowledgement and a pause for the firmware to settle,
+/// which is most of the time this takes - and is wasted when the cooler is
+/// already there, which it is for every write after the first.
+fn apply(dev: &mut Device, rpm: u16, mode: protocol::Mode) -> Result<(), Error> {
+    let began = Instant::now();
+
+    if mode != protocol::Mode::Realtime {
+        dev.send_acked(protocol::enter_realtime(), ACK_TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
     dev.send_acked(protocol::set_realtime_rpm(rpm), ACK_TIMEOUT)?;
+    debug!("apply {rpm} rpm took {} ms", began.elapsed().as_millis());
     Ok(())
 }
 
