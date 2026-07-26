@@ -2,14 +2,43 @@ gui:
 {
   config,
   lib,
+  osConfig ? { },
   ...
 }:
 let
   cfg = config.programs.flydigictl;
+
+  # Stylix is not a dependency and is not required; it is simply the thing most
+  # likely to already know what colours this machine uses. Where it is present,
+  # its scheme is the default rather than something to be wired up by hand.
+  scheme = if config.lib ? stylix then config.lib.stylix.colors.withHashtag else null;
+
+  fromScheme =
+    if scheme == null then
+      { }
+    else
+      {
+        background = scheme.base00;
+        text = scheme.base05;
+        primary = scheme.base0D;
+        success = scheme.base0B;
+        warning = scheme.base0A;
+        danger = scheme.base08;
+      };
 in
 {
   options.programs.flydigictl = {
-    enable = lib.mkEnableOption "the Flydigi cooler interface";
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = osConfig.services.flydigictl.enable or false;
+      example = true;
+      description = ''
+        Whether to install the Flydigi cooler interface.
+
+        On by default where this machine runs the daemon: the interface is what
+        that daemon is driven by, and it is of no use anywhere else.
+      '';
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -19,7 +48,8 @@ in
 
     palette = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
-      default = { };
+      default = fromScheme;
+      defaultText = lib.literalMD "the Stylix scheme, where Stylix is in use";
       example = lib.literalExpression ''
         {
           background = "#1f2430";
@@ -35,12 +65,12 @@ in
 
         The interface draws itself rather than through GTK or Qt, so no desktop
         setting reaches it: left alone it can only tell whether the system asked
-        for light or dark. Fill this in - from a colour scheme generator, or by
-        hand - and it uses these instead.
+        for light or dark.
 
         Roles are `background`, `text`, `primary`, `success`, `warning` and
         `danger`; anything else is ignored. Partial sets are not: the interface
-        wants all six, or it falls back to the light and dark it knows.
+        wants all six, or it falls back to the light and dark it knows. Set this
+        to `{ }` to keep it that way.
       '';
     };
   };
