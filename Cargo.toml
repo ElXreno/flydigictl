@@ -13,7 +13,9 @@ gui = ["dep:iced"]
 
 [dependencies]
 argh = "0.1"
-iced = { version = "0.14", features = ["canvas", "tokio"], optional = true }
+# Only `canvas` on top of the defaults. Notably not `tokio`: it was here for a
+# timer this no longer has, and its runtime alone was a third of the binary.
+iced = { version = "0.14", features = ["canvas"], optional = true }
 inotify = { version = "0.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,6 +45,11 @@ required-features = ["gui"]
 # Full debug info on a wgpu-sized dependency tree buys a 400 MB binary and the
 # link time to match. Line tables keep backtraces readable, which is all this
 # has ever needed.
+# Nothing here ships symbols: crane leaves them in, and they are a third of
+# what lands in the store.
+[profile.release]
+strip = "symbols"
+
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
