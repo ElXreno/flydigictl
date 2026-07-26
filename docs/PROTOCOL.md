@@ -62,6 +62,7 @@ Queries answer with data in the same shape. Captured from a BS3 Pro:
 | `0x02` | `01`                | awake; `02` means asleep                    |
 | `0x04` | six bytes           | the cooler's MAC address                    |
 | `0x25` | `01`               | work mode                                    |
+| `0x45` | `01`               | side strip lit; `00` when off                |
 | `0x27` | `a4 06 60 09 b8 0b 74 0e` | gear speeds: 1700, 2400, 3000, 3700 |
 
 Note that `0x27` returns exactly four values, one per gear. The low/medium/high
@@ -130,13 +131,14 @@ the target on every tick, and pins the cooler in an override it never leaves.
 | `0x42` | Effect upload block | data, 15 bytes max | yes      |
 | `0x43` | Play user buffer    | `01`               | yes      |
 | `0x44` | Select effect       | mode `00`-`05`     | yes      |
-| `0x45` | Select strip        | none, then `01`    | yes      |
+
 | `0x46` | Strip power         | `00` off, `01` on  | yes      |
 | `0x47` | Write effect frame  | index + 10 bytes   | yes      |
 | `0x48` | Gear indicator LED  | `00` off, `01` on  | yes      |
 | `0x01` | Query device info   | none               | yes      |
 | `0x04` | Query MAC address   | none               | yes      |
 | `0x02` | Query power state   | none               | yes      |
+| `0x45` | Query strip power   | none               | yes      |
 | `0x07` | Query supply level  | none               | yes      |
 | `0x25` | Query work mode     | none               | yes      |
 | `0x27` | Query gear RPM table| none               | yes      |
@@ -287,6 +289,24 @@ What does survive is the buffer itself, so a preset can be kept by uploading
 its own palette through `0x47` instead of asking for it by number. The palettes
 live in `FUN_ram_00005bdc` as a 180-byte buffer - exactly 18 frames of 10 bytes
 - with the usual header in the first six bytes and RGB triplets after it.
+
+### What can and cannot be read back
+
+Only one bit of the lighting is readable. Settings live in a twelve-byte block
+restored from flash at `0x1000` behind a `2SDB` magic, and `0x45` answers with
+the strip's own flag from it - verified on hardware: `01`, then `00` after
+`0x46 00`, then `01` again.
+
+The pattern is another matter. The animation sits in a separate block at
+`0x2000`, and nothing in the firmware ever sends it back: every reference to it
+is a write, either restoring it at boot or persisting it on apply. The header
+in it holds the mode, speed, brightness and colour, so the information exists -
+there is simply no command that asks for it. A client that wants to show what
+the strip is playing has to remember what it set.
+
+THRM sends `0x45` with a payload as though it selected something. The handler
+ignores the payload and only ever replies with the flag, so those reports were
+doing nothing.
 
 Two independent light sources, easy to confuse:
 

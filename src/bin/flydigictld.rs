@@ -477,6 +477,7 @@ fn control_loop(
     // Read once per connection: the level only changes with the supply, and
     // that means a re-enumeration anyway.
     let mut supply: Option<protocol::Supply> = None;
+    let mut strip_on: Option<bool> = None;
     let mut warned_about_supply = false;
 
     for event in rx {
@@ -568,6 +569,7 @@ fn control_loop(
                                 Reply::Ok { .. } => {
                                     info!("lighting {lighting}");
                                     config.lighting = Some(lighting);
+                                    strip_on = Some(lighting.mode != protocol::LightMode::Off);
                                     persist(config, config_path, writable)
                                 }
                                 failure => failure,
@@ -629,7 +631,13 @@ fn control_loop(
                             }
                         }
 
-                        // Same for the lighting, which nothing can read back.
+                        // Whether the strip is lit is the one thing the cooler
+                        // will report; what it is showing, it will not.
+                        strip_on = dev
+                            .query(protocol::query_strip(), ACK_TIMEOUT)
+                            .ok()
+                            .and_then(|payload| payload.first().map(|byte| *byte != 0));
+
                         if let Some(lighting) = config.lighting {
                             match send_all(dev, lighting.reports(None)) {
                                 Reply::Ok { .. } => info!("lighting {lighting}"),
@@ -744,7 +752,8 @@ fn control_loop(
                                 manual: config.manual_rpm.is_some(),
                                 supply: supply.map(|supply| supply.to_string()),
                                 supply_max_rpm: supply.map(|supply| supply.max_rpm()),
-                                lighting: config.lighting.unwrap_or_default(),
+                                lighting: config.lighting,
+                                strip_on,
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 demands: demands.clone(),
                             }));
