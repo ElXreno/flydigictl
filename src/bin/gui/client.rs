@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flydigictl::config::Config;
-use flydigictl::ipc::{Gear, Light, Reply, Request, Status, Warning};
-use flydigictl::protocol::Standby;
+use flydigictl::ipc::{Gear, Reply, Request, Status, Warning};
+use flydigictl::protocol::{Lighting, Standby};
 
 /// Long enough for a daemon busy talking to the cooler, short enough that a
 /// wedged one cannot freeze the window.
@@ -84,8 +84,8 @@ impl Client {
         })
     }
 
-    pub fn light(&self, light: Light) -> Result<Option<Warning>, String> {
-        match self.request_within(LIGHT_TIMEOUT, &Request::Light { light })? {
+    pub fn set_lighting(&self, lighting: Lighting) -> Result<Option<Warning>, String> {
+        match self.request_within(LIGHT_TIMEOUT, &Request::SetLighting { lighting })? {
             Reply::Ok { warning } => Ok(warning),
             other => Err(unexpected(&other)),
         }

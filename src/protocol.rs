@@ -287,6 +287,87 @@ impl std::fmt::Display for Supply {
     }
 }
 
+/// The lighting the cooler is showing.
+///
+/// Nothing can be read back: the firmware has no query for any of this, so
+/// whoever set it last is the only one who knows. The daemon therefore keeps
+/// this and hands it to clients, instead of every client guessing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum LightMode {
+    #[default]
+    Off,
+    Static { color: Rgb },
+    Effect { effect: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Lighting {
+    pub mode: LightMode,
+    /// Percentage, and it applies to an animation as much as to a colour: the
+    /// firmware keeps brightness in the same header byte either way.
+    pub brightness: u8,
+    /// The gear indicator LEDs, a separate light from the strip.
+    pub indicators: bool,
+}
+
+impl Default for Lighting {
+    fn default() -> Self {
+        Self {
+            mode: LightMode::Off,
+            brightness: 100,
+            indicators: true,
+        }
+    }
+}
+
+impl std::fmt::Display for Lighting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.mode {
+            LightMode::Off => write!(f, "off"),
+            LightMode::Static { color } => write!(
+                f,
+                "#{:02x}{:02x}{:02x} at {}%",
+                color.r, color.g, color.b, self.brightness
+            ),
+            LightMode::Effect { effect } => write!(f, "effect {effect} at {}%", self.brightness),
+        }
+    }
+}
+
+impl Lighting {
+    /// Reports that take the cooler from `previous` to this.
+    ///
+    /// Only the difference is sent: re-uploading an animation to toggle the
+    /// indicator LEDs would restart it for no reason.
+    pub fn reports(&self, previous: Option<&Self>) -> Vec<[u8; REPORT_LEN]> {
+        let mut reports = Vec::new();
+
+        let strip_changed = previous.is_none_or(|previous| {
+            previous.mode != self.mode || previous.brightness != self.brightness
+        });
+
+        if strip_changed {
+            match self.mode {
+                LightMode::Off => reports.push(light_off()),
+                LightMode::Static { color } => {
+                    reports.extend(light_static(color, self.brightness));
+                }
+                LightMode::Effect { effect } => {
+                    reports.extend(light_effect(effect, self.brightness));
+                }
+            }
+        }
+
+        if previous.is_none_or(|previous| previous.indicators != self.indicators) {
+            reports.push(gear_light(self.indicators));
+        }
+
+        reports
+    }
+}
+
 /// Ask how much power the cooler thinks it has.
 pub fn query_supply() -> [u8; REPORT_LEN] {
     build_report(CMD_QUERY_SUPPLY, &[])
@@ -454,7 +535,7 @@ const BUFFER_LEN: usize = 180;
 /// strip straight back to this buffer. Uploading the preset's own palette is
 /// therefore the only way to keep it playing in gear mode - the byte patterns
 /// below are transcribed from `FUN_ram_00005bdc`.
-fn preset_buffer(effect: u8) -> [u8; BUFFER_LEN] {
+fn preset_buffer(effect: u8, brightness: u8) -> [u8; BUFFER_LEN] {
     let mut buf = [0u8; BUFFER_LEN];
 
     // Header: 00 02 00 <mode> <speed> <brightness>
@@ -468,7 +549,7 @@ fn preset_buffer(effect: u8) -> [u8; BUFFER_LEN] {
     buf[1] = 0x02;
     buf[3] = mode;
     buf[4] = speed;
-    buf[5] = 100;
+    buf[5] = brightness.min(100);
 
     // Presets 1-3 paint four colours at three points of each 90-byte half;
     // only the hue differs between them.
@@ -574,8 +655,11 @@ fn light_upload(buf: &[u8]) -> Vec<[u8; REPORT_LEN]> {
 }
 
 /// Upload a built-in effect's palette and play it.
-pub fn light_effect(effect: u8) -> Vec<[u8; REPORT_LEN]> {
-    light_upload(&preset_buffer(effect))
+///
+/// Brightness lives in the same header byte the firmware's own presets use, so
+/// dimming an animation does not mean giving it up for a static colour.
+pub fn light_effect(effect: u8, brightness: u8) -> Vec<[u8; REPORT_LEN]> {
+    light_upload(&preset_buffer(effect, brightness))
 }
 
 /// Toggle the gear indicator LEDs. Unlike the strip, this is a normal
@@ -584,7 +668,7 @@ pub fn gear_light(on: bool) -> [u8; REPORT_LEN] {
     build_report(CMD_GEAR_LIGHT, &[u8::from(on)])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,

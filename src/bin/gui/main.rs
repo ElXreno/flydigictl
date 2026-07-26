@@ -2,6 +2,7 @@
 
 mod client;
 mod editor;
+mod picker;
 mod theme;
 
 use std::path::PathBuf;
@@ -10,13 +11,17 @@ use std::time::Duration;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, row, scrollable, slider, text,
+    text_input,
 };
 use iced::{Element, Length, Subscription, Theme};
 
-use flydigictl::config::{Config, Point};
+use flydigictl::config::{Config, Curve, Point, Sensor};
 use flydigictl::curve;
-use flydigictl::ipc::{self, Light, Status, Warning, WarningCode};
-use flydigictl::protocol::{Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
+use flydigictl::ipc::{self, Status, Warning, WarningCode};
+use flydigictl::protocol::{LightMode, Lighting, Rgb, Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
+use flydigictl::sensor;
+
+use picker::Hsv;
 
 use client::Client;
 
@@ -78,13 +83,20 @@ enum Message {
     /// The slider was let go, so the value is meant.
     GearCommitted(usize),
 
-    ColorChanged {
-        channel: Channel,
-        value: u8,
-    },
-    LightStatic,
-    LightEffect(u8),
-    LightOff,
+    CurveAdded,
+    CurveRemoved,
+    CurveRenamed(String),
+    CurveNameCommitted,
+    CurveSensorPicked(SensorChoice),
+    CurvePanicChanged(u8),
+    CurvePanicCommitted,
+
+    /// Dragging inside the picker, which only moves the swatch.
+    ColorPicked(Hsv),
+    ColorCommitted,
+    ModePicked(LightMode),
+    BrightnessChanged(u8),
+    BrightnessCommitted,
     IndicatorsToggled(bool),
 
     StandbySelected(Standby),
@@ -98,12 +110,50 @@ enum Tab {
     Light,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel {
-    Red,
-    Green,
-    Blue,
-    Brightness,
+/// A sensor as offered in the picker: the label a person reads, plus what the
+/// config needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SensorChoice {
+    label: String,
+    sensor: Sensor,
+}
+
+impl std::fmt::Display for SensorChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label)
+    }
+}
+
+/// Every hwmon on the machine, plus a whole-hwmon entry for each: an empty
+/// label means "the hottest input of this chip", which is what covers a pair
+/// of DIMMs or two drives with one curve.
+fn sensor_choices() -> Vec<SensorChoice> {
+    let mut choices: Vec<SensorChoice> = Vec::new();
+
+    for entry in sensor::list() {
+        let whole = SensorChoice {
+            label: format!("{} (hottest)", entry.hwmon),
+            sensor: Sensor {
+                hwmon: entry.hwmon.clone(),
+                label: String::new(),
+            },
+        };
+        if !choices.contains(&whole) {
+            choices.push(whole);
+        }
+
+        if !entry.label.is_empty() {
+            choices.push(SensorChoice {
+                label: format!("{}/{}", entry.hwmon, entry.label),
+                sensor: Sensor {
+                    hwmon: entry.hwmon,
+                    label: entry.label,
+                },
+            });
+        }
+    }
+
+    choices
 }
 
 struct State {
@@ -128,9 +178,15 @@ struct State {
     /// in the device and the physical button changes it too.
     gears: Vec<ipc::Gear>,
 
-    color: [u8; 3],
-    brightness: u8,
-    indicators: bool,
+    /// What the controls are set to, which is not always what the cooler is
+    /// showing: the truth is in the status, this is the draft being edited.
+    light: Lighting,
+    picked: Hsv,
+
+    sensors: Vec<SensorChoice>,
+    /// Held while it is being typed, because sending on every keystroke means
+    /// a socket round trip per letter.
+    name_draft: Option<String>,
 }
 
 impl State {
@@ -145,9 +201,14 @@ impl State {
             theme: theme::load(),
             tab: Tab::Curve,
             gears: Vec::new(),
-            color: [0x7A, 0xA2, 0xF7],
-            brightness: 100,
-            indicators: true,
+            light: Lighting::default(),
+            picked: Hsv::from_rgb(Rgb {
+                r: 0x7A,
+                g: 0xA2,
+                b: 0xF7,
+            }),
+            sensors: sensor_choices(),
+            name_draft: None,
         };
         state.reload();
         state
@@ -195,6 +256,14 @@ impl State {
         };
 
         let outcome = self.client.set_config(config);
+        self.report(outcome);
+    }
+
+    /// Send the draft as it stands. The daemon works out which reports that
+    /// actually needs, so a brightness nudge does not restart an animation it
+    /// did not have to.
+    fn apply_light(&mut self) {
+        let outcome = self.client.set_lighting(self.light);
         self.report(outcome);
     }
 
@@ -281,6 +350,14 @@ fn updates(socket: &Socket) -> impl Stream<Item = Message> {
 fn update(state: &mut State, message: Message) {
     match message {
         Message::Live(status) => {
+            // The cooler cannot be asked what it is showing, so the daemon's
+            // record is the only starting point the controls have.
+            if state.status.is_none() {
+                state.light = status.lighting;
+                if let LightMode::Static { color } = status.lighting.mode {
+                    state.picked = Hsv::from_rgb(color);
+                }
+            }
             state.status = Some(*status);
             // A daemon that came back up may be running a different config.
             if state.config.is_none() {
@@ -391,38 +468,114 @@ fn update(state: &mut State, message: Message) {
             state.load_gears();
         }
 
-        Message::ColorChanged { channel, value } => match channel {
-            Channel::Red => state.color[0] = value,
-            Channel::Green => state.color[1] = value,
-            Channel::Blue => state.color[2] = value,
-            Channel::Brightness => state.brightness = value,
-        },
+        Message::CurveAdded => {
+            let sensor = state
+                .sensors
+                .first()
+                .map(|choice| choice.sensor.clone())
+                .unwrap_or_default();
 
-        Message::LightStatic => {
-            let outcome = state.client.light(Light::Static {
-                color: format!(
-                    "{:02x}{:02x}{:02x}",
-                    state.color[0], state.color[1], state.color[2]
-                ),
-                brightness: state.brightness,
-            });
-            state.report(outcome);
+            if let Some(config) = state.config.as_mut() {
+                config.curves.push(Curve {
+                    name: String::new(),
+                    sensor,
+                    points: vec![
+                        Point {
+                            temp_c: 50,
+                            rpm: 500,
+                        },
+                        Point {
+                            temp_c: 80,
+                            rpm: 2600,
+                        },
+                    ],
+                    panic_c: None,
+                });
+                state.selected = config.curves.len() - 1;
+            }
+            state.name_draft = None;
+            state.push();
         }
 
-        Message::LightEffect(mode) => {
-            let outcome = state.client.light(Light::Effect { mode });
-            state.report(outcome);
+        Message::CurveRemoved => {
+            if let Some(config) = state.config.as_mut() {
+                // Removing the last one would leave the cooler with nothing to
+                // follow, which is a way to cook a machine by accident.
+                if config.curves.len() > 1 && state.selected < config.curves.len() {
+                    config.curves.remove(state.selected);
+                    state.selected = state.selected.min(config.curves.len() - 1);
+                }
+            }
+            state.name_draft = None;
+            state.push();
         }
 
-        Message::LightOff => {
-            let outcome = state.client.light(Light::Off);
-            state.report(outcome);
+        Message::CurveRenamed(name) => state.name_draft = Some(name),
+
+        Message::CurveNameCommitted => {
+            let Some(name) = state.name_draft.take() else {
+                return;
+            };
+            let selected = state.selected;
+            if let Some(curve) = state
+                .config
+                .as_mut()
+                .and_then(|config| config.curves.get_mut(selected))
+            {
+                curve.name = name.trim().to_string();
+            }
+            state.push();
         }
+
+        Message::CurveSensorPicked(choice) => {
+            let selected = state.selected;
+            if let Some(curve) = state
+                .config
+                .as_mut()
+                .and_then(|config| config.curves.get_mut(selected))
+            {
+                curve.sensor = choice.sensor;
+            }
+            state.push();
+        }
+
+        Message::CurvePanicChanged(panic_c) => {
+            let selected = state.selected;
+            if let Some(curve) = state
+                .config
+                .as_mut()
+                .and_then(|config| config.curves.get_mut(selected))
+            {
+                curve.panic_c = Some(panic_c);
+            }
+        }
+
+        Message::CurvePanicCommitted => state.push(),
+
+        Message::ColorPicked(hsv) => {
+            state.picked = hsv;
+            state.light.mode = LightMode::Static {
+                color: hsv.to_rgb(),
+            };
+        }
+
+        Message::ColorCommitted => state.apply_light(),
+
+        Message::ModePicked(mode) => {
+            state.light.mode = mode;
+            if let LightMode::Static { color } = mode {
+                state.picked = Hsv::from_rgb(color);
+            }
+            state.apply_light();
+        }
+
+        Message::BrightnessChanged(brightness) => state.light.brightness = brightness,
+
+        Message::BrightnessCommitted => state.apply_light(),
 
         Message::IndicatorsToggled(on) => {
-            state.indicators = on;
-            let outcome = state.client.light(Light::Indicators { on });
-            state.report(outcome);
+            state.light.indicators = on;
+            state.apply_light();
         }
 
         Message::DismissNote => state.note = None,
@@ -558,7 +711,14 @@ fn curve_list(state: &State) -> Element<'_, Message> {
         return card(text("No config").size(14).into());
     };
 
-    let mut list = column![text("Curves").size(15)].spacing(6);
+    let mut list = column![row![
+        text("Curves").size(15).width(Length::Fill),
+        button(text("Add"))
+            .style(button::secondary)
+            .on_press(Message::CurveAdded),
+    ]
+    .align_y(iced::Alignment::Center)]
+    .spacing(6);
 
     for (index, curve) in config.curves.iter().enumerate() {
         let name = curve::describe(curve, index);
@@ -629,20 +789,55 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
         format!("{}/{}", curve.sensor.hwmon, curve.sensor.label)
     };
 
+    let chosen = state
+        .sensors
+        .iter()
+        .find(|choice| choice.sensor == curve.sensor)
+        .cloned()
+        .or_else(|| {
+            // A curve can name a sensor this machine does not have, and the
+            // picker should say so rather than look empty.
+            Some(SensorChoice {
+                label: format!("{sensor} (missing)"),
+                sensor: curve.sensor.clone(),
+            })
+        });
+
+    let panic_c = curve.panic_c.unwrap_or(config.smoothing.panic_c);
+
     card(
         column![
             row![
-                column![text(name).size(17), text(sensor).size(12)].spacing(2),
-                container(text(format!(
-                    "panic at {} C",
-                    curve.panic_c.unwrap_or(config.smoothing.panic_c)
-                )))
-                .width(Length::Fill)
-                .align_right(Length::Fill),
-            ],
+                text_input(
+                    "name this curve",
+                    state.name_draft.as_ref().unwrap_or(&curve.name)
+                )
+                .on_input(Message::CurveRenamed)
+                .on_submit(Message::CurveNameCommitted)
+                .width(Length::Fixed(200.0)),
+                pick_list(state.sensors.clone(), chosen, Message::CurveSensorPicked)
+                    .width(Length::Fill),
+                button(text("Remove"))
+                    .style(button::danger)
+                    .on_press(Message::CurveRemoved),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                text(format!("Panic at {panic_c} C")).width(Length::Fixed(120.0)),
+                slider(40u8..=110, panic_c, Message::CurvePanicChanged)
+                    .on_release(Message::CurvePanicCommitted)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
             graph,
-            text("Drag a point to move it, click the graph to add one, right click to remove")
-                .size(12),
+            row![
+                text("Drag a point to move it, click the graph to add one, right click to remove")
+                    .size(12)
+                    .width(Length::Fill),
+                text(format!("above {panic_c} C the reading skips smoothing")).size(12),
+            ],
         ]
         .spacing(8)
         .into(),
@@ -737,60 +932,99 @@ fn gears_pane(state: &State) -> Element<'_, Message> {
 }
 
 fn light_pane(state: &State) -> Element<'_, Message> {
-    let channel = |label: &'static str, which: Channel, value: u8| {
-        row![
-            text(label).width(Length::Fixed(90.0)),
-            slider(0u8..=255, value, move |value| Message::ColorChanged {
-                channel: which,
-                value
+    let showing = state
+        .status
+        .as_ref()
+        .map(|status| status.lighting)
+        .unwrap_or_default();
+
+    let mode = |label: String, which: LightMode| {
+        button(text(label))
+            .style(if showing.mode == which {
+                button::primary
+            } else {
+                button::secondary
             })
-            .width(Length::Fill),
-            text(format!("{value:3}")).width(Length::Fixed(40.0)),
-        ]
-        .spacing(8)
+            .on_press(Message::ModePicked(which))
     };
 
-    let mut effects = row![text("Built in").width(Length::Fixed(90.0))].spacing(6);
-    for mode in 1..=EFFECT_COUNT {
-        effects = effects.push(
-            button(text(mode.to_string()))
-                .style(button::secondary)
-                .on_press(Message::LightEffect(mode)),
-        );
+    let mut effects = row![text("Animations").width(Length::Fixed(90.0))]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+    for effect in 1..=EFFECT_COUNT {
+        effects = effects.push(mode(effect.to_string(), LightMode::Effect { effect }));
     }
+
+    let swatch = match state.light.mode {
+        LightMode::Static { color } => picker::color(color),
+        _ => iced::Color::TRANSPARENT,
+    };
+
+    let drafted = state.picked.to_rgb();
 
     card(
         column![
-            text("Side strip").size(16),
-            channel("Red", Channel::Red, state.color[0]),
-            channel("Green", Channel::Green, state.color[1]),
-            channel("Blue", Channel::Blue, state.color[2]),
+            row![
+                text("Side strip").size(16).width(Length::Fill),
+                text(format!("showing {showing}")).size(13),
+            ],
+            row![
+                canvas(picker::Shades { hsv: state.picked })
+                    .width(Length::Fixed(260.0))
+                    .height(Length::Fixed(150.0)),
+                column![
+                    container(text(""))
+                        .width(Length::Fixed(60.0))
+                        .height(Length::Fixed(60.0))
+                        .style(move |_: &Theme| container::Style {
+                            background: Some(swatch.into()),
+                            border: iced::border::rounded(4),
+                            ..container::Style::default()
+                        }),
+                    text(format!(
+                        "#{:02x}{:02x}{:02x}",
+                        drafted.r, drafted.g, drafted.b
+                    ))
+                    .size(12),
+                ]
+                .spacing(6),
+            ]
+            .spacing(12),
+            canvas(picker::Hues { hsv: state.picked })
+                .width(Length::Fixed(260.0))
+                .height(Length::Fixed(20.0)),
             row![
                 text("Brightness").width(Length::Fixed(90.0)),
-                slider(0u8..=100, state.brightness, |value| {
-                    Message::ColorChanged {
-                        channel: Channel::Brightness,
-                        value,
-                    }
-                })
+                slider(
+                    0u8..=100,
+                    state.light.brightness,
+                    Message::BrightnessChanged
+                )
+                .on_release(Message::BrightnessCommitted)
                 .width(Length::Fill),
-                text(format!("{:3}%", state.brightness)).width(Length::Fixed(40.0)),
+                text(format!("{:3}%", state.light.brightness)).width(Length::Fixed(40.0)),
             ]
-            .spacing(8),
-            row![
-                button(text("Apply colour")).on_press(Message::LightStatic),
-                button(text("Off"))
-                    .style(button::secondary)
-                    .on_press(Message::LightOff),
-            ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
             effects,
+            row![
+                text("").width(Length::Fixed(90.0)),
+                mode(
+                    "Colour".to_string(),
+                    LightMode::Static {
+                        color: state.picked.to_rgb()
+                    }
+                ),
+                mode("Off".to_string(), LightMode::Off),
+            ]
+            .spacing(6),
             text(
-                "Effects are uploaded as their own animation rather than selected by number, \
-                 because the firmware drops a numbered one the moment the fan leaves realtime"
+                "Brightness applies to whichever of these is running, so dimming an animation \
+                 keeps it animated"
             )
             .size(11),
-            checkbox(state.indicators)
+            checkbox(state.light.indicators)
                 .label("Gear indicator LEDs")
                 .on_toggle(Message::IndicatorsToggled),
         ]

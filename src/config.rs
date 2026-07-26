@@ -39,6 +39,13 @@ pub struct Config {
     /// after the daemon stops or the machine shuts down. `None` leaves whatever
     /// the cooler was already set to.
     pub standby: Option<crate::protocol::Standby>,
+
+    /// Lighting to put back whenever a cooler turns up.
+    ///
+    /// The strip keeps an uploaded animation in its own flash, but nothing
+    /// tells us what is on it, so the daemon restores what it was last asked
+    /// for rather than trusting the device to remember.
+    pub lighting: Option<crate::protocol::Lighting>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -61,7 +68,7 @@ pub struct Curve {
     pub panic_c: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sensor {
     /// hwmon driver name, e.g. "k10temp", "nvme" or "spd5118".
@@ -144,6 +151,7 @@ impl Default for Config {
             hysteresis_rpm: 100,
             manual_rpm: None,
             standby: Some(crate::protocol::Standby::Delayed),
+            lighting: None,
         }
     }
 }

@@ -557,14 +557,22 @@ fn control_loop(
                         Some(dev) => set_gear(dev, supply, &gear, rpm),
                     },
 
-                    Request::Light { light } => match device.as_mut() {
+                    Request::SetLighting { lighting } => match device.as_mut() {
                         None => Reply::Error {
                             message: "no cooler".to_string(),
                         },
-                        Some(dev) => match light_reports(&light) {
-                            Err(message) => Reply::Error { message },
-                            Ok(reports) => send_all(dev, reports),
-                        },
+                        Some(dev) => {
+                            let reports = lighting.reports(config.lighting.as_ref());
+
+                            match send_all(dev, reports) {
+                                Reply::Ok { .. } => {
+                                    info!("lighting {lighting}");
+                                    config.lighting = Some(lighting);
+                                    persist(config, config_path, writable)
+                                }
+                                failure => failure,
+                            }
+                        }
                     },
 
                     // Stored in the cooler, but also in the config so that a
@@ -618,6 +626,14 @@ fn control_loop(
                             match dev.send_acked(protocol::set_standby(standby), ACK_TIMEOUT) {
                                 Ok(_) => info!("standby set to {standby}"),
                                 Err(err) => warn!("cannot set standby: {err}"),
+                            }
+                        }
+
+                        // Same for the lighting, which nothing can read back.
+                        if let Some(lighting) = config.lighting {
+                            match send_all(dev, lighting.reports(None)) {
+                                Reply::Ok { .. } => info!("lighting {lighting}"),
+                                other => warn!("cannot set the lighting: {other:?}"),
                             }
                         }
                     }
@@ -728,6 +744,7 @@ fn control_loop(
                                 manual: config.manual_rpm.is_some(),
                                 supply: supply.map(|supply| supply.to_string()),
                                 supply_max_rpm: supply.map(|supply| supply.max_rpm()),
+                                lighting: config.lighting.unwrap_or_default(),
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 demands: demands.clone(),
                             }));
@@ -818,42 +835,6 @@ fn set_gear(dev: &mut Device, supply: Option<protocol::Supply>, name: &str, rpm:
                 });
 
             Reply::Ok { warning }
-        }
-    }
-}
-
-fn light_reports(light: &ipc::Light) -> Result<Vec<[u8; protocol::REPORT_LEN]>, String> {
-    match light {
-        ipc::Light::Off => Ok(vec![protocol::light_off()]),
-
-        ipc::Light::Indicators { on } => Ok(vec![protocol::gear_light(*on)]),
-
-        ipc::Light::Effect { mode } => {
-            if *mode == 0 || *mode > protocol::EFFECT_COUNT {
-                return Err(format!(
-                    "no effect {mode}, the firmware has 1-{}",
-                    protocol::EFFECT_COUNT
-                ));
-            }
-            Ok(protocol::light_effect(*mode))
-        }
-
-        ipc::Light::Static { color, brightness } => {
-            let hex = color.strip_prefix('#').unwrap_or(color);
-            if hex.len() != 6 {
-                return Err(format!("bad colour: {color}"));
-            }
-
-            let byte = |range: std::ops::Range<usize>| {
-                u8::from_str_radix(&hex[range], 16).map_err(|_| format!("bad colour: {color}"))
-            };
-
-            let color = protocol::Rgb {
-                r: byte(0..2)?,
-                g: byte(2..4)?,
-                b: byte(4..6)?,
-            };
-            Ok(protocol::light_static(color, *brightness))
         }
     }
 }
