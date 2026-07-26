@@ -39,3 +39,10 @@ path = "src/bin/flydigictld.rs"
 name = "flydigictl-gui"
 path = "src/bin/gui/main.rs"
 required-features = ["gui"]
+
+# Full debug info on a wgpu-sized dependency tree buys a 400 MB binary and the
+# link time to match. Line tables keep backtraces readable, which is all this
+# has ever needed.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
