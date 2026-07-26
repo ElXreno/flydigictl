@@ -2,7 +2,6 @@ gui:
 {
   config,
   lib,
-  osConfig ? { },
   ...
 }:
 let
@@ -28,17 +27,7 @@ let
 in
 {
   options.programs.flydigictl = {
-    enable = lib.mkOption {
-      type = lib.types.bool;
-      default = osConfig.services.flydigictl.enable or false;
-      example = true;
-      description = ''
-        Whether to install the Flydigi cooler interface.
-
-        On by default where this machine runs the daemon: the interface is what
-        that daemon is driven by, and it is of no use anywhere else.
-      '';
-    };
+    enable = lib.mkEnableOption "the Flydigi cooler interface";
 
     package = lib.mkOption {
       type = lib.types.package;
