@@ -1000,7 +1000,7 @@ fn view(state: &State) -> Element<'_, Message> {
         curve_list(state)
     ]
     .spacing(12)
-    .width(Length::Fixed(300.0));
+    .width(Length::Fixed(320.0));
 
     let pane = match state.tab {
         Tab::Curve => editor_pane(state),
