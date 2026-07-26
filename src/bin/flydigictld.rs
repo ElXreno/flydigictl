@@ -738,7 +738,14 @@ fn control_loop(
                             // a reconnect or the physical button does that.
                             let moved = applied
                                 .is_none_or(|last| last.abs_diff(wanted) >= config.hysteresis_rpm);
-                            let drifted = status.mode != protocol::Mode::Realtime;
+
+                            // The cooler reports what it was told to hold, and
+                            // that is the only account worth trusting: another
+                            // client, a refused write or the button on the case
+                            // can all leave it holding something else, and
+                            // believing our own memory means never noticing.
+                            let drifted = status.mode != protocol::Mode::Realtime
+                                || applied.is_some_and(|last| status.target_rpm != last);
 
                             if moved || drifted {
                                 match apply(dev, wanted, status.mode) {
@@ -902,15 +909,32 @@ fn read_supply(dev: &mut Device) -> Option<protocol::Supply> {
 /// Entering costs an acknowledgement and a pause for the firmware to settle,
 /// which is most of the time this takes - and is wasted when the cooler is
 /// already there, which it is for every write after the first.
+///
+/// The speed itself is acknowledged with `01` when it was taken and `02` when
+/// the cooler was not in realtime after all, in which case it is dropped. That
+/// byte is the difference between a speed applied and a speed imagined.
 fn apply(dev: &mut Device, rpm: u16, mode: protocol::Mode) -> Result<(), Error> {
     let began = Instant::now();
 
-    if mode != protocol::Mode::Realtime {
+    let enter = |dev: &mut Device| -> Result<(), Error> {
         dev.send_acked(protocol::enter_realtime(), ACK_TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    };
+
+    if mode != protocol::Mode::Realtime {
+        enter(dev)?;
     }
 
-    dev.send_acked(protocol::set_realtime_rpm(rpm), ACK_TIMEOUT)?;
+    if dev.send_acked(protocol::set_realtime_rpm(rpm), ACK_TIMEOUT)? != 1 {
+        warn!("cooler refused {rpm} rpm, entering realtime and trying again");
+        enter(dev)?;
+
+        if dev.send_acked(protocol::set_realtime_rpm(rpm), ACK_TIMEOUT)? != 1 {
+            return Err(Error::Config(format!("the cooler will not hold {rpm} rpm")));
+        }
+    }
+
     debug!("apply {rpm} rpm took {} ms", began.elapsed().as_millis());
     Ok(())
 }
