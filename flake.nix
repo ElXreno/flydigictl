@@ -155,6 +155,12 @@
             imports = [ (import ./nix/module.nix { inherit (config.packages) default gui; }) ];
           }
         );
+
+        # The interface is a desktop application, so its own settings belong to
+        # the user rather than to the machine.
+        flake.homeModules.default = moduleWithSystem (
+          { config, ... }: _: { imports = [ (import ./nix/home.nix config.packages.gui) ]; }
+        );
       }
     );
 }

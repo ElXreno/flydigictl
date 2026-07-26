@@ -86,9 +86,56 @@ access to the cooler. `gui.enable` adds the desktop interface, which is built
 as a separate package: it drags in wgpu and a windowing stack that a headless
 install has no use for.
 
-The interface follows the desktop's light or dark preference and otherwise
-themes itself, the same as any other application that is not built on GTK or
-Qt. Nothing to configure.
+The interface draws itself rather than through GTK or Qt, so no desktop theme
+reaches it: `org.freedesktop.appearance` offers a light or dark preference, an
+accent colour and a contrast flag, and no palette at all. Left alone it follows
+that preference.
+
+Given colours, it uses them. It reads the first of these it can parse:
+
+| Path | |
+|------|--|
+| `$FLYDIGICTL_PALETTE` | wherever you point it |
+| `~/.config/flydigictl/palette.json` | this application's own |
+| `~/.cache/wallust/colors.json` | whatever wallust last generated |
+| `~/.cache/wal/colors.json` | the same from pywal |
+
+Its own file names the six colours it uses:
+
+```json
+{
+  "background": "#1f2430",
+  "text":       "#cccac2",
+  "primary":    "#73d0ff",
+  "success":    "#d5ff80",
+  "warning":    "#ffd173",
+  "danger":     "#f28779"
+}
+```
+
+A base16 scheme in JSON (`base00` through `base0F`) works too. The wallust and
+pywal caches are read for the sake of desktops that already generate one -
+nothing needs setting up there.
+
+On Nix, `homeModules.default` fills the file in:
+
+```nix
+programs.flydigictl = {
+  enable = true;
+  palette = with config.lib.stylix.colors.withHashtag; {
+    background = base00;
+    text = base05;
+    primary = base0D;
+    success = base0B;
+    warning = base0A;
+    danger = base08;
+  };
+};
+```
+
+Deciding which of sixteen scheme colours plays which of six roles is a
+judgement call, which is why the module takes the answer rather than making
+it.
 
 ### Other distributions
 

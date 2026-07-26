@@ -2,6 +2,7 @@
 
 mod client;
 mod editor;
+mod palette;
 mod picker;
 
 use std::path::PathBuf;
@@ -36,6 +37,12 @@ struct Args {
 
 fn main() -> iced::Result {
     let args: Args = argh::from_env();
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .format_target(false)
+        .init();
+
     let socket = args
         .socket
         .unwrap_or_else(|| PathBuf::from(ipc::DEFAULT_SOCKET));
@@ -256,6 +263,9 @@ struct State {
     /// warning that was still true.
     note: Option<String>,
 
+    /// Read once at startup: the file behind it is written by a scheme
+    /// generator, and those do not change it while a window is open.
+    theme: Option<Theme>,
     tab: Tab,
 
     /// Read from the cooler rather than from the config: the gear table lives
@@ -288,6 +298,7 @@ impl State {
             writable: false,
             selected: 0,
             note: None,
+            theme: palette::load(),
             tab: Tab::Curve,
             gears: Vec::new(),
             light: Lighting::default(),
@@ -392,13 +403,13 @@ fn title(state: &State) -> String {
     }
 }
 
-/// Left to iced, which follows the desktop's light or dark preference.
+/// The machine's own palette when it has one, and otherwise iced's judgement.
 ///
-/// Returning `None` is how that is asked for. An interface that insisted on
-/// colours of its own would look imported from another machine, and reading
-/// them from a file would only work on the one distribution that writes it.
-fn theme(_state: &State) -> Option<Theme> {
-    None
+/// `None` is how iced is asked to follow the desktop's light or dark
+/// preference, which is all there is to follow when nothing generated a
+/// scheme.
+fn theme(state: &State) -> Option<Theme> {
+    state.theme.clone()
 }
 
 /// Updates arrive when the cooler has something to say, not on a timer.
