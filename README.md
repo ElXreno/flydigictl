@@ -341,6 +341,13 @@ effect = 3
 Brightness applies to animations as well as to a plain colour: it is the same
 header byte either way, so dimming an effect keeps it running.
 
+### Exporting
+
+The daemon holds the running configuration, and on NixOS the file behind it is
+a store path nobody can edit. **Export** in the interface copies it as TOML, so
+a curve dragged into shape by hand can be pasted into a config file or turned
+into Nix.
+
 ### Standby
 
 ```console

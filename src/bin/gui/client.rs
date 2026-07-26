@@ -23,6 +23,7 @@ const TIMEOUT: Duration = Duration::from_millis(500);
 /// so its answer is slow by construction rather than by fault.
 const LIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 
+#[derive(Clone)]
 pub struct Client {
     path: PathBuf,
 }
