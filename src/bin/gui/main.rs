@@ -125,6 +125,8 @@ enum Message {
 #[derive(Debug, Clone)]
 enum Answer {
     Acked(Result<Option<Warning>, String>),
+    /// Kept apart so the next lighting change knows the cooler is free again.
+    Light(Result<Option<Warning>, String>),
     Config(Result<(Config, bool), String>),
     Gears(Result<Vec<ipc::Gear>, String>),
     Sensors(Result<Vec<ipc::SensorInfo>, String>),
@@ -300,8 +302,15 @@ struct State {
     available: Vec<ipc::SensorInfo>,
     sensors: Vec<SensorChoice>,
 
-    /// How many requests are out. Controls are held while any of them is.
+    /// How many requests are out, which is only worth knowing where there is
+    /// nothing yet to draw.
     pending: usize,
+
+    /// Lighting takes the cooler the best part of a second, and a slider let go
+    /// twice would otherwise queue two of them. Only the latest state matters,
+    /// so a change made while one is out replaces it instead of following it.
+    lighting_out: bool,
+    lighting_again: bool,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
     name_draft: Option<String>,
@@ -330,6 +339,8 @@ impl State {
             sensors: Vec::new(),
             name_draft: None,
             pending: 0,
+            lighting_out: false,
+            lighting_again: false,
         };
 
         let opening = Task::batch([state.reload(), state.load_sensors()]);
@@ -381,9 +392,16 @@ impl State {
     /// actually needs, so a brightness nudge does not restart an animation it
     /// did not have to.
     fn apply_light(&mut self) -> Task<Message> {
+        if self.lighting_out {
+            self.lighting_again = true;
+            return Task::none();
+        }
+
+        self.lighting_out = true;
+
         let client = self.client.clone();
         let light = self.light;
-        self.ask(move || client.set_lighting(light), Answer::Acked)
+        self.ask(move || client.set_lighting(light), Answer::Light)
     }
 
     fn report(&mut self, outcome: Result<Option<Warning>, String>) {
@@ -545,6 +563,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
             match *answer {
                 Answer::Acked(outcome) => state.report(outcome),
+
+                Answer::Light(outcome) => {
+                    state.report(outcome);
+                    state.lighting_out = false;
+
+                    if state.lighting_again {
+                        state.lighting_again = false;
+                        return state.apply_light();
+                    }
+                }
 
                 Answer::Config(Ok((config, writable))) => {
                     state.selected = state.selected.min(config.curves.len().saturating_sub(1));
