@@ -73,8 +73,6 @@ impl Shared {
     /// Clients that went away are dropped here: a failed send is the only
     /// notice we get, since nothing tells the daemon a socket was closed.
     fn publish(&mut self, status: Option<Status>) {
-        // Nothing changed while the cooler stays away, and subscribers do not
-        // need to hear that on every wakeup.
         if status.is_none() && self.status.is_none() {
             return;
         }
@@ -318,10 +316,6 @@ fn serve(path: &Path, tx: Sender<Event>, shared: Arc<Mutex<Shared>>) -> Result<(
             let _ = std::fs::remove_file(path);
 
             UnixListener::bind(path).map_err(|source| {
-                // Under systemd the socket is created for us, in a directory an
-                // unprivileged daemon has no business writing to. Getting here
-                // means the service ran without that descriptor, which is a
-                // wiring problem rather than something to retry into.
                 if source.kind() == std::io::ErrorKind::PermissionDenied {
                     return Error::Config(format!(
                         "no socket was passed and {} cannot be created here: start \
@@ -375,8 +369,6 @@ fn handle_client(stream: UnixStream, tx: Sender<Event>, shared: Arc<Mutex<Shared
             continue;
         }
 
-        // A subscription takes over the connection, so it never comes back
-        // here to read another request.
         if let Ok(Request::Subscribe) = serde_json::from_str::<Request>(&line) {
             stream_status(writer, Arc::clone(&shared));
             return;
@@ -462,8 +454,6 @@ fn control_loop(
     let mut device: Option<Device> = None;
     let mut curves = Curves::build(config);
 
-    // Kept between frames: the curves are evaluated on their own schedule, but
-    // every frame is published and needs something to say about them.
     let mut demands: Vec<Demand> = Vec::new();
     let mut leader: Option<Demand> = None;
     let mut evaluated: Option<Instant> = None;
@@ -474,17 +464,11 @@ fn control_loop(
     // reconnect can restore it: realtime mode does not survive one.
     let mut applied: Option<u16> = None;
 
-    // Read once per connection: the level only changes with the supply, and
-    // that means a re-enumeration anyway.
     let mut supply: Option<protocol::Supply> = None;
     let mut strip_on: Option<bool> = None;
 
-    // Seeded from the config and then owned by the daemon.
-    //
-    // Deliberately not left in the config struct: a client replaces that
-    // wholesale with `set_config`, so a stale copy of it - and every client
-    // holds one - would silently undo a lighting or speed change made since it
-    // last read the config.
+    // Not left in the config struct: `set_config` replaces that wholesale, so
+    // a client's stale copy would undo changes made since it last read one.
     let mut manual_rpm = config.manual_rpm;
     let mut lighting = config.lighting;
     let mut warned_about_supply = false;
@@ -496,8 +480,6 @@ fn control_loop(
                     if fresh != *config {
                         info!("config reloaded from {}", config_path.display());
 
-                        // A rebuild is somebody stating intent, so declared
-                        // values win over what this session was asked for.
                         if fresh.manual_rpm != config.manual_rpm {
                             manual_rpm = fresh.manual_rpm;
                         }
@@ -613,8 +595,6 @@ fn control_loop(
                         }
                     },
 
-                    // Stored in the cooler, but also in the config so that a
-                    // cooler met for the first time is set up the same way.
                     Request::SetStandby { standby } => {
                         config.standby = Some(standby);
 

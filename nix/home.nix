@@ -7,9 +7,6 @@ gui:
 let
   cfg = config.programs.flydigictl;
 
-  # Stylix is not a dependency and is not required; it is simply the thing most
-  # likely to already know what colours this machine uses. Where it is present,
-  # its scheme is the default rather than something to be wired up by hand.
   scheme = if config.lib ? stylix then config.lib.stylix.colors.withHashtag else null;
 
   fromScheme =

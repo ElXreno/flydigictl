@@ -86,8 +86,6 @@ in
 
   config = lib.mkMerge [
     (lib.mkIf cfg.gui.enable {
-      # The interface talks to the daemon and never to the cooler, so it needs
-      # nothing beyond the socket group its user is already in.
       environment.systemPackages = [ cfg.gui.package ];
     })
 
@@ -107,8 +105,6 @@ in
       environment.etc."flydigictl/config.toml".source =
         format.generate "flydigictl-config.toml" daemon.settings;
 
-      # The daemon reaches the cooler through this group rather than through
-      # root, which is what lets it run as a dynamic user.
       users.groups.flydigi = { };
 
       services.udev.extraRules = ''
@@ -130,9 +126,8 @@ in
         description = "Flydigi cooler fan curve daemon";
         wantedBy = [ "multi-user.target" ];
 
-        # The socket is not merely an entry point, it is the only one: systemd
-        # creates it in a directory the dynamic user cannot write to, so a
-        # daemon started without that descriptor has nowhere to listen.
+        # systemd creates the socket in a directory the dynamic user cannot
+        # write to, so a daemon started without that descriptor cannot listen.
         requires = [ "flydigictld.socket" ];
         after = [
           "flydigictld.socket"
@@ -144,8 +139,6 @@ in
           Restart = "on-failure";
           RestartSec = 5;
 
-          # No account of its own, no home, no privileges beyond the group that
-          # opens the cooler.
           DynamicUser = true;
           SupplementaryGroups = [ "flydigi" ];
 
@@ -159,12 +152,9 @@ in
           PrivateTmp = true;
           NoNewPrivileges = true;
 
-          # This alone stops the daemon opening anything but a unix socket.
-          #
-          # PrivateNetwork would add almost nothing on top of it and costs a
-          # whole class of sensors: sysfs is tagged by network namespace, so a
-          # private one hides every hwmon that hangs off a network device -
-          # a Wi-Fi card's temperature among them.
+          # No PrivateNetwork: sysfs is tagged by network namespace, so a
+          # private one hides every hwmon behind a network device, a Wi-Fi
+          # card's temperature among them.
           RestrictAddressFamilies = [ "AF_UNIX" ];
           RestrictNamespaces = true;
           RestrictRealtime = true;

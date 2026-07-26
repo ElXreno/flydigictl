@@ -139,15 +139,8 @@ impl std::fmt::Display for SensorChoice {
 fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
     use std::collections::BTreeMap;
 
-    // Grouped by chip name, and inside a group by address, so that everything
-    // about one kind of sensor sits together: the entries that span all of them
-    // first, then each chip on its own. Sorted rather than left in discovery
-    // order, which is hwmon numbering and means nothing to a reader.
-    //
-    // No readings here on purpose. The list is built once per connection, so
-    // any number in it goes stale within seconds - and worse, sits stale in the
-    // closed picker. What a sensor is doing belongs to the curve list and the
-    // graph, both of which are live.
+    // No readings: the list is built once per connection, so a number in it
+    // would sit stale in the closed picker.
     let mut chips: BTreeMap<&str, BTreeMap<&str, Vec<&ipc::SensorInfo>>> = BTreeMap::new();
     for entry in sensors {
         chips
@@ -172,9 +165,6 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
         labels.sort_unstable();
         labels.dedup();
 
-        // The whole chip name, device left empty: matches every one of them and
-        // takes the hottest reading among them. What a curve over a pair of
-        // DIMMs or drives wants, and what a hand-written config usually says.
         choices.push(SensorChoice {
             label: if several {
                 format!("{hwmon} (all, hottest)")
@@ -338,8 +328,6 @@ impl State {
     /// warning worth showing or nothing worth saying.
     fn report(&mut self, outcome: Result<Option<Warning>, String>) {
         self.note = match outcome {
-            // Already on screen for as long as it holds, so repeating it here
-            // would only push the useful half of the reply out of view.
             Ok(Some(Warning {
                 code: WarningCode::ConfigReadOnly,
                 ..
@@ -468,8 +456,6 @@ fn updates(socket: &Socket) -> impl Stream<Item = Message> {
 fn update(state: &mut State, message: Message) {
     match message {
         Message::Live(status) => {
-            // The cooler cannot be asked what it is showing, so the daemon's
-            // record is the only starting point the controls have.
             if state.status.is_none() {
                 state.load_sensors();
 
@@ -481,14 +467,11 @@ fn update(state: &mut State, message: Message) {
                 }
             }
             state.status = Some(*status);
-            // A daemon that came back up may be running a different config.
             if state.config.is_none() {
                 state.reload();
             }
         }
 
-        // The daemon itself is unreachable, so its config is no longer known
-        // either; a cooler that merely went away arrives as a status instead.
         Message::Offline => {
             state.status = None;
             state.config = None;
@@ -506,8 +489,7 @@ fn update(state: &mut State, message: Message) {
             state.push();
         }
 
-        // Points are left in place while the pointer is down: sorting mid-drag
-        // would renumber them under the hand doing the dragging.
+        // Sorting mid-drag would renumber points under the hand dragging one.
         Message::PointMoved { index, point } => {
             if let Some(points) = state.points_mut() {
                 if let Some(slot) = points.get_mut(index) {
@@ -518,8 +500,6 @@ fn update(state: &mut State, message: Message) {
 
         Message::PointRemoved(index) => {
             if let Some(points) = state.points_mut() {
-                // A curve with nothing left in it silently stops asking for
-                // air, so keep the last point.
                 if points.len() > 1 && index < points.len() {
                     points.remove(index);
                 }
@@ -578,8 +558,6 @@ fn update(state: &mut State, message: Message) {
             let outcome = state.client.set_gear(&gear.name, gear.rpm);
             state.report(outcome);
 
-            // The cooler rounds and clamps what it stores, so take its word
-            // for the table rather than our own.
             state.load_gears();
         }
 
@@ -614,8 +592,7 @@ fn update(state: &mut State, message: Message) {
 
         Message::CurveRemoved => {
             if let Some(config) = state.config.as_mut() {
-                // Removing the last one would leave the cooler with nothing to
-                // follow, which is a way to cook a machine by accident.
+                // Nothing left to follow is a way to cook a machine.
                 if config.curves.len() > 1 && state.selected < config.curves.len() {
                     config.curves.remove(state.selected);
                     state.selected = state.selected.min(config.curves.len() - 1);
@@ -801,8 +778,6 @@ fn speed_card(state: &State) -> Element<'_, Message> {
 }
 
 fn manual_card(state: &State) -> Element<'_, Message> {
-    // From the status, not the config: the daemon owns this now, so a config
-    // fetched a while ago would show a speed nobody is holding.
     let manual = state
         .manual_draft
         .or_else(|| state.status.as_ref().and_then(|status| status.manual_rpm));

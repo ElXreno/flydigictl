@@ -5,8 +5,6 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
-    # Keeps compiled dependencies in the store instead of rebuilding four
-    # hundred crates every time a line of this one changes.
     crane.url = "github:ipetkov/crane";
   };
 
@@ -46,8 +44,6 @@
               libxcb
             ];
 
-            # mold links the interface in about a second; the default linker
-            # spends ten on it, which is most of a rebuild.
             common = {
               inherit src;
               strictDeps = true;
@@ -55,9 +51,6 @@
               RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
             };
 
-            # No target filter here: crane hands the same arguments to the
-            # test run, and narrowing it to the binaries meant the library's
-            # tests silently stopped running in the sandbox.
             daemonArgs = common // {
               pname = "flydigictl";
               inherit version;
@@ -72,7 +65,6 @@
                 pkgs.copyDesktopItems
               ];
               buildInputs = guiLibraries;
-              # The library tests belong to the plain package, which runs them.
               doCheck = false;
             };
           in
@@ -91,9 +83,6 @@
               }
             );
 
-            # Built apart from the daemon and the CLI: the interface drags in
-            # wgpu and a windowing stack, and a headless install should not
-            # have to carry either.
             packages.gui = craneLib.buildPackage (
               guiArgs
               // {
@@ -143,8 +132,6 @@
 
               RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
-              # cargo run inside the shell links against these but has no rpath
-              # of its own to fall back on.
               LD_LIBRARY_PATH = lib.makeLibraryPath guiLibraries;
             };
           };
@@ -156,8 +143,6 @@
           }
         );
 
-        # The interface is a desktop application, so its own settings belong to
-        # the user rather than to the machine.
         flake.homeModules.default = moduleWithSystem (
           { config, ... }: _: { imports = [ (import ./nix/home.nix config.packages.gui) ]; }
         );
