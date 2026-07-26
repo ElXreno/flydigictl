@@ -74,6 +74,10 @@ pub struct Sensor {
     /// hwmon driver name, e.g. "k10temp", "nvme" or "spd5118".
     pub hwmon: String,
 
+    /// Which chip of that name, by kernel device: `nvme0`, `21-0051`. Empty
+    /// matches all of them, which is what a machine with one of each wants.
+    pub device: String,
+
     /// Label of the input, e.g. "Tctl". Empty matches every input of that
     /// hwmon, and the hottest of them is used - which is what you want for two
     /// sticks of RAM or a pair of drives.
@@ -115,6 +119,7 @@ impl Default for Sensor {
     fn default() -> Self {
         Self {
             hwmon: "k10temp".to_string(),
+            device: String::new(),
             label: String::new(),
         }
     }

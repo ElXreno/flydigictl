@@ -107,10 +107,16 @@ pub fn describe(curve: &Curve, index: usize) -> String {
     if !curve.name.is_empty() {
         return curve.name.clone();
     }
-    if curve.sensor.label.is_empty() {
-        format!("{}#{index}", curve.sensor.hwmon)
+    let chip = if curve.sensor.device.is_empty() {
+        curve.sensor.hwmon.clone()
     } else {
-        format!("{}/{}", curve.sensor.hwmon, curve.sensor.label)
+        format!("{} {}", curve.sensor.hwmon, curve.sensor.device)
+    };
+
+    if curve.sensor.label.is_empty() {
+        format!("{chip}#{index}")
+    } else {
+        format!("{chip}/{}", curve.sensor.label)
     }
 }
 

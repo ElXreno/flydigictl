@@ -131,13 +131,41 @@ impl std::fmt::Display for SensorChoice {
 /// a sandboxed daemon may be blind to sensors that are plainly there here, and
 /// offering one of those would build a curve that never reads anything.
 fn sensor_choices(sensors: Vec<ipc::SensorInfo>) -> Vec<SensorChoice> {
+    // Two of the same part share a hwmon name, so those entries need the
+    // device to tell them apart. Everything else reads better without it.
+    let mut chips: std::collections::BTreeSet<(String, String)> = Default::default();
+    for entry in &sensors {
+        chips.insert((entry.hwmon.clone(), entry.device.clone()));
+    }
+
+    let ambiguous: std::collections::BTreeSet<String> = chips
+        .iter()
+        .filter(|(hwmon, _)| chips.iter().filter(|(other, _)| other == hwmon).count() > 1)
+        .map(|(hwmon, _)| hwmon.clone())
+        .collect();
+
+    let name = |entry: &ipc::SensorInfo| {
+        if ambiguous.contains(&entry.hwmon) && !entry.device.is_empty() {
+            format!("{} {}", entry.hwmon, entry.device)
+        } else {
+            entry.hwmon.clone()
+        }
+    };
+
     let mut choices: Vec<SensorChoice> = Vec::new();
 
-    for entry in sensors {
+    for entry in &sensors {
+        // One entry per chip standing for all of its inputs: an empty label
+        // takes the hottest, which is what covers a pair of DIMMs at once.
         let whole = SensorChoice {
-            label: format!("{} (hottest)", entry.hwmon),
+            label: format!("{} (hottest)", name(entry)),
             sensor: Sensor {
                 hwmon: entry.hwmon.clone(),
+                device: if ambiguous.contains(&entry.hwmon) {
+                    entry.device.clone()
+                } else {
+                    String::new()
+                },
                 label: String::new(),
             },
         };
@@ -147,10 +175,18 @@ fn sensor_choices(sensors: Vec<ipc::SensorInfo>) -> Vec<SensorChoice> {
 
         if !entry.label.is_empty() {
             choices.push(SensorChoice {
-                label: format!("{}/{}", entry.hwmon, entry.label),
+                label: format!(
+                    "{}/{}{}",
+                    name(entry),
+                    entry.label,
+                    entry
+                        .temp_c
+                        .map_or(String::new(), |temp| format!("  {temp} C"))
+                ),
                 sensor: Sensor {
-                    hwmon: entry.hwmon,
-                    label: entry.label,
+                    hwmon: entry.hwmon.clone(),
+                    device: entry.device.clone(),
+                    label: entry.label.clone(),
                 },
             });
         }
@@ -186,6 +222,10 @@ struct State {
     light: Lighting,
     picked: Hsv,
 
+    /// Held while the slider is under the pointer, for the same reason as the
+    /// curve points: one socket round trip per pixel is unusable.
+    manual_draft: Option<u16>,
+
     sensors: Vec<SensorChoice>,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
@@ -210,6 +250,7 @@ impl State {
                 g: 0xA2,
                 b: 0xF7,
             }),
+            manual_draft: None,
             sensors: Vec::new(),
             name_draft: None,
         };
@@ -437,22 +478,15 @@ fn update(state: &mut State, message: Message) {
                     .clamp(MIN_RPM, state.ceiling())
             });
 
-            if let Some(config) = state.config.as_mut() {
-                config.manual_rpm = rpm;
-            }
+            state.manual_draft = None;
             let outcome = state.client.set_manual(rpm);
             state.report(outcome);
         }
 
-        Message::ManualChanged(rpm) => {
-            if let Some(config) = state.config.as_mut() {
-                config.manual_rpm = Some(rpm);
-            }
-        }
+        Message::ManualChanged(rpm) => state.manual_draft = Some(rpm),
 
         Message::ManualCommitted => {
-            let rpm = state.config.as_ref().and_then(|config| config.manual_rpm);
-            if let Some(rpm) = rpm {
+            if let Some(rpm) = state.manual_draft.take() {
                 let outcome = state.client.set_manual(Some(rpm));
                 state.report(outcome);
             }
@@ -701,7 +735,11 @@ fn speed_card(state: &State) -> Element<'_, Message> {
 }
 
 fn manual_card(state: &State) -> Element<'_, Message> {
-    let manual = state.config.as_ref().and_then(|config| config.manual_rpm);
+    // From the status, not the config: the daemon owns this now, so a config
+    // fetched a while ago would show a speed nobody is holding.
+    let manual = state
+        .manual_draft
+        .or_else(|| state.status.as_ref().and_then(|status| status.manual_rpm));
 
     let mut inner = column![checkbox(manual.is_some())
         .label("Hold a fixed speed")

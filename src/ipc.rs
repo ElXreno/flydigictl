@@ -78,6 +78,8 @@ pub enum Reply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorInfo {
     pub hwmon: String,
+    /// Kernel device behind the chip, which is what tells two of a kind apart.
+    pub device: String,
     /// Empty when the input has no label of its own.
     pub label: String,
     pub temp_c: Option<u8>,
@@ -129,6 +131,7 @@ impl Status {
             current_rpm: None,
             target_rpm: None,
             manual: false,
+            manual_rpm: None,
             supply: None,
             supply_max_rpm: None,
             lighting: None,
@@ -147,6 +150,10 @@ pub struct Status {
     pub current_rpm: Option<u16>,
     pub target_rpm: Option<u16>,
     pub manual: bool,
+    /// The speed being held by hand, which is the daemon's and not the
+    /// config's: a client must not read it back out of a config it may have
+    /// fetched before the change.
+    pub manual_rpm: Option<u16>,
 
     /// What the cooler is powered by: `low`, `medium`, `full` or unknown.
     pub supply: Option<String>,

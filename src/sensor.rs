@@ -8,6 +8,11 @@ use crate::config::Sensor;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Available {
     pub hwmon: String,
+    /// Kernel name of the device behind the chip: `nvme0`, `21-0050`, `phy0`.
+    ///
+    /// Two of the same part answer to the same hwmon name - a pair of drives is
+    /// `nvme` twice - so this is the only thing that tells them apart.
+    pub device: String,
     pub label: String,
     pub path: PathBuf,
 }
@@ -30,10 +35,13 @@ pub fn list() -> Vec<Available> {
             continue;
         };
 
+        let device = device_of(&dir);
+
         for input in inputs_of(&dir) {
             let label = label_of(&input).unwrap_or_default();
             found.push(Available {
                 hwmon: hwmon.clone(),
+                device: device.clone(),
                 label,
                 path: input,
             });
@@ -43,30 +51,23 @@ pub fn list() -> Vec<Available> {
     found
 }
 
-/// Find the input a config entry asks for.
-pub fn resolve(sensor: &Sensor) -> Option<PathBuf> {
-    let available = list();
-
-    let matching = available
-        .iter()
-        .filter(|entry| entry.hwmon == sensor.hwmon)
-        .collect::<Vec<_>>();
-
-    if sensor.label.is_empty() {
-        return matching.first().map(|entry| entry.path.clone());
-    }
-
-    matching
-        .iter()
-        .find(|entry| entry.label == sensor.label)
-        .map(|entry| entry.path.clone())
-}
-
 /// Read a resolved input, in whole degrees.
 pub fn read(path: &Path) -> Option<u8> {
     let millidegrees: i64 = read_trimmed(path)?.parse().ok()?;
     let degrees = millidegrees / 1000;
     (0..=255).contains(&degrees).then_some(degrees as u8)
+}
+
+fn device_of(dir: &Path) -> String {
+    std::fs::read_link(dir.join("device"))
+        .ok()
+        .and_then(|target| {
+            target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 fn inputs_of(dir: &Path) -> Vec<PathBuf> {
@@ -99,12 +100,15 @@ fn read_trimmed(path: &Path) -> Option<String> {
 
 /// All inputs a config entry matches.
 ///
-/// An empty label matches every input of that hwmon - one curve then covers
-/// both DIMMs or both drives without spelling out indices.
+/// Empty fields match anything: no label covers every input of that hwmon, and
+/// no device covers every chip answering to that name. One curve then spans
+/// both DIMMs or both drives without spelling out indices, while naming a
+/// device picks out one of them.
 pub fn resolve_all(sensor: &Sensor) -> Vec<PathBuf> {
     list()
         .into_iter()
         .filter(|entry| entry.hwmon == sensor.hwmon)
+        .filter(|entry| sensor.device.is_empty() || entry.device == sensor.device)
         .filter(|entry| sensor.label.is_empty() || entry.label == sensor.label)
         .map(|entry| entry.path)
         .collect()
