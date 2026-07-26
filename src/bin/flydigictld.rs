@@ -19,12 +19,13 @@ use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
 use flydigictl::protocol::{self, MAX_RPM, MIN_RPM, STOP_RPM};
 use flydigictl::{sensor, watch};
 
-/// The cooler reports itself every 500 ms, so the loop wakes twice as often to
-/// forward what it says without waiting on the next wakeup. Curves are
-/// evaluated on their own, much slower schedule: sensors do not change faster
-/// than the fan can react, but subscribers still want the speed in real time.
-const FRAME_POLL: Duration = Duration::from_millis(250);
-const FRAME_TIMEOUT: Duration = Duration::from_millis(200);
+/// The cooler reports itself every 500 ms; the loop wakes far more often than
+/// that because a command waits for it to come back from reading. Frames are
+/// queued by the kernel meanwhile, so nothing is missed by looking sooner, and
+/// a client asking for a speed gets an answer in tens of milliseconds instead
+/// of a couple of hundred. Curves are evaluated on their own, slower schedule.
+const FRAME_POLL: Duration = Duration::from_millis(50);
+const FRAME_TIMEOUT: Duration = Duration::from_millis(40);
 
 /// Silence this long means the cooler is gone rather than merely quiet.
 const SILENCE: Duration = Duration::from_secs(3);

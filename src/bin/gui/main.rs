@@ -289,9 +289,12 @@ struct State {
     light: Lighting,
     picked: Hsv,
 
-    /// Held while the slider is under the pointer, for the same reason as the
-    /// curve points: one socket round trip per pixel is unusable.
-    manual_draft: Option<u16>,
+    /// What was last asked for, until the daemon says the same thing back.
+    ///
+    /// Without it the control draws the daemon's answer only, so a click sits
+    /// there doing nothing for as long as the round trip takes and the window
+    /// looks stuck when it is merely waiting.
+    manual_intent: Option<Option<u16>>,
 
     /// As the daemon reports them, and the choices built from that.
     available: Vec<ipc::SensorInfo>,
@@ -322,7 +325,7 @@ impl State {
                 g: 0xA2,
                 b: 0xF7,
             }),
-            manual_draft: None,
+            manual_intent: None,
             available: Vec::new(),
             sensors: Vec::new(),
             name_draft: None,
@@ -416,6 +419,8 @@ fn offload<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     answer: impl FnOnce(T) -> Answer + Send + 'static,
 ) -> Task<Message> {
+    let started = std::time::Instant::now();
+
     Task::perform(
         async move {
             let (tx, rx) = iced::futures::channel::oneshot::channel();
@@ -425,6 +430,8 @@ fn offload<T: Send + 'static>(
             rx.await
         },
         move |result| {
+            log::debug!("request answered in {} ms", started.elapsed().as_millis());
+
             Message::Done(Box::new(match result {
                 Ok(value) => answer(value),
                 Err(_) => Answer::Acked(Err("the request never finished".to_string())),
@@ -572,6 +579,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
 
+            // Drop the intent once the daemon reports the same thing, so a
+            // change made elsewhere is not held off the screen by it.
+            if state.manual_intent == Some(status.manual_rpm) {
+                state.manual_intent = None;
+            }
+
             state.status = Some(*status);
 
             // A daemon that just came back may be running a different config,
@@ -641,19 +654,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     .clamp(MIN_RPM, state.ceiling())
             });
 
-            state.manual_draft = None;
+            state.manual_intent = Some(rpm);
 
             let client = state.client.clone();
             state.ask(move || client.set_manual(rpm), Answer::Acked)
         }
 
         Message::ManualChanged(rpm) => {
-            state.manual_draft = Some(rpm);
+            state.manual_intent = Some(Some(rpm));
             Task::none()
         }
 
         Message::ManualCommitted => {
-            let Some(rpm) = state.manual_draft.take() else {
+            let Some(Some(rpm)) = state.manual_intent else {
                 return Task::none();
             };
 
@@ -959,9 +972,10 @@ fn speed_card(state: &State) -> Element<'_, Message> {
 }
 
 fn manual_card(state: &State) -> Element<'_, Message> {
-    let manual = state
-        .manual_draft
-        .or_else(|| state.status.as_ref().and_then(|status| status.manual_rpm));
+    let manual = match state.manual_intent {
+        Some(intent) => intent,
+        None => state.status.as_ref().and_then(|status| status.manual_rpm),
+    };
 
     let mut inner = column![checkbox(manual.is_some())
         .label("Hold a fixed speed")
@@ -1239,10 +1253,13 @@ fn light_pane(state: &State) -> Element<'_, Message> {
     let showing = state.status.as_ref().and_then(|status| status.lighting);
     let strip_on = state.status.as_ref().and_then(|status| status.strip_on);
 
+    // Marked from the draft rather than from the status: lighting takes the
+    // cooler the best part of a second, and a button that only lights up once
+    // that is over reads as a click that did nothing.
     let mode = |label: String, which: LightMode| {
         action(
             label,
-            if showing.is_some_and(|showing| showing.mode == which) {
+            if state.light.mode == which {
                 button::primary
             } else {
                 button::secondary
