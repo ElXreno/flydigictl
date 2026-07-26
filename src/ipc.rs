@@ -75,7 +75,8 @@ pub enum Reply {
 }
 
 /// A temperature input, as the daemon sees it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SensorInfo {
     pub hwmon: String,
     /// Stable address of the chip, which is what tells two of a kind apart.
@@ -88,7 +89,8 @@ pub struct SensorInfo {
 }
 
 /// One stored gear speed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Gear {
     pub name: String,
     pub rpm: u16,
@@ -144,7 +146,11 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Missing fields default rather than fail: a client and a daemon are updated
+/// separately, and a newer interface talking to a daemon that has not been
+/// restarted yet should degrade to "not reported" instead of refusing to parse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Status {
     pub model: String,
     pub connected: bool,
@@ -179,4 +185,31 @@ pub struct Status {
 
     /// Every curve's reading and demand, for graphs and debugging.
     pub demands: Vec<Demand>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_status_from_an_older_daemon() {
+        let older = r#"{"model":"BS3 Pro","connected":true,"temp_c":49,"current_rpm":1100,
+            "target_rpm":2826,"manual":false,"leading":"ram","demands":[]}"#;
+
+        let status: Status = serde_json::from_str(older).unwrap();
+        assert_eq!(status.model, "BS3 Pro");
+        assert!(status.lighting.is_none());
+        assert!(status.strip_on.is_none());
+        assert!(status.manual_rpm.is_none());
+    }
+
+    #[test]
+    fn reads_a_sensor_without_an_address() {
+        let older = r#"{"hwmon":"k10temp","label":"Tctl","temp_c":52}"#;
+
+        let sensor: SensorInfo = serde_json::from_str(older).unwrap();
+        assert_eq!(sensor.hwmon, "k10temp");
+        assert!(sensor.device.is_empty());
+        assert!(sensor.kernel.is_empty());
+    }
 }
