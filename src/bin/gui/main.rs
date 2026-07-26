@@ -4,16 +4,17 @@ mod client;
 mod editor;
 mod palette;
 mod picker;
+mod spinner;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
-    button, canvas, checkbox, column, container, pick_list, row, scrollable, slider, text,
-    text_input,
+    button, canvas, checkbox, column, container, pick_list, progress_bar, row, scrollable, slider,
+    text, text_input,
 };
-use iced::{Element, Length, Subscription, Theme};
+use iced::{Element, Length, Subscription, Task, Theme};
 
 use flydigictl::config::{Config, Curve, Point, Sensor};
 use flydigictl::curve;
@@ -26,6 +27,9 @@ use client::Client;
 
 /// How long to wait before dialling a daemon that is not there yet.
 const RECONNECT: Duration = Duration::from_secs(1);
+
+/// How long a note stays up before it takes itself away.
+const NOTE_LIFE: Duration = Duration::from_secs(6);
 
 /// Control a Flydigi BS series cooler
 #[derive(argh::FromArgs)]
@@ -105,7 +109,28 @@ enum Message {
     IndicatorsToggled(bool),
 
     StandbySelected(Standby),
-    DismissNote,
+    ExportConfig,
+    /// A frame went by, which is how the note knows its time is up.
+    Ticked,
+
+    /// A request the interface sent has come back.
+    Done(Box<Answer>),
+}
+
+/// What a background request produced.
+///
+/// Every one of these is a blocking socket round trip, and lighting is the
+/// worst of them: the daemon walks the cooler through a couple of dozen
+/// acknowledged reports before it answers. None of that belongs on the thread
+/// that draws the window.
+#[derive(Debug, Clone)]
+enum Answer {
+    Acked(Result<Option<Warning>, String>),
+    /// Kept apart so the next lighting change knows the cooler is free again.
+    Light(Result<Option<Warning>, String>),
+    Config(Result<(Config, bool), String>),
+    Gears(Result<Vec<ipc::Gear>, String>),
+    Sensors(Result<Vec<ipc::SensorInfo>, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +276,7 @@ struct State {
     /// whether or not the last click succeeded, so it is drawn from `writable`
     /// instead - keeping it here meant the next successful command wiped a
     /// warning that was still true.
-    note: Option<String>,
+    note: Option<Note>,
 
     /// Read once at startup: the file behind it is written by a scheme
     /// generator, and those do not change it while a window is open.
@@ -267,20 +292,36 @@ struct State {
     light: Lighting,
     picked: Hsv,
 
-    /// Held while the slider is under the pointer, for the same reason as the
-    /// curve points: one socket round trip per pixel is unusable.
-    manual_draft: Option<u16>,
+    /// What was last asked for, until the daemon says the same thing back.
+    ///
+    /// Without it the control draws the daemon's answer only, so a click sits
+    /// there doing nothing for as long as the round trip takes and the window
+    /// looks stuck when it is merely waiting.
+    manual_intent: Option<Option<u16>>,
 
     /// As the daemon reports them, and the choices built from that.
     available: Vec<ipc::SensorInfo>,
     sensors: Vec<SensorChoice>,
+
+    /// How many requests are out, which is only worth knowing where there is
+    /// nothing yet to draw.
+    pending: usize,
+
+    /// Lighting takes the cooler the best part of a second, and a slider let go
+    /// twice would otherwise queue two of them. Only the latest state matters,
+    /// so a change made while one is out replaces it instead of following it.
+    lighting_out: bool,
+    lighting_again: bool,
+
+    /// When the queue last went from empty to busy, for the turning arc.
+    working_since: Option<std::time::Instant>,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
     name_draft: Option<String>,
 }
 
 impl State {
-    fn new(socket: PathBuf) -> Self {
+    fn new(socket: PathBuf) -> (Self, Task<Message>) {
         let mut state = Self {
             client: Client::new(socket),
             status: None,
@@ -297,75 +338,91 @@ impl State {
                 g: 0xA2,
                 b: 0xF7,
             }),
-            manual_draft: None,
+            manual_intent: None,
             available: Vec::new(),
             sensors: Vec::new(),
             name_draft: None,
+            pending: 0,
+            lighting_out: false,
+            lighting_again: false,
+            working_since: None,
         };
-        state.reload();
-        state.load_sensors();
-        state
+
+        let opening = Task::batch([state.reload(), state.load_sensors()]);
+        (state, opening)
     }
 
-    fn load_sensors(&mut self) {
-        match self.client.sensors() {
-            Ok(sensors) => {
-                self.sensors = sensor_choices(&sensors);
-                self.available = sensors;
-            }
-            Err(err) => self.note = Some(err),
+    /// True while a request is out, which is only worth knowing where there is
+    /// nothing yet to draw.
+    fn busy(&self) -> bool {
+        self.pending > 0
+    }
+
+    fn ask<T: Send + 'static>(
+        &mut self,
+        work: impl FnOnce() -> T + Send + 'static,
+        answer: impl FnOnce(T) -> Answer + Send + 'static,
+    ) -> Task<Message> {
+        if self.pending == 0 {
+            self.working_since = Some(std::time::Instant::now());
         }
+
+        self.pending += 1;
+        offload(work, answer)
     }
 
-    fn load_gears(&mut self) {
-        match self.client.gears() {
-            Ok(gears) => self.gears = gears,
-            Err(err) => self.note = Some(err),
+    fn load_sensors(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        self.ask(move || client.sensors(), Answer::Sensors)
+    }
+
+    fn load_gears(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        self.ask(move || client.gears(), Answer::Gears)
+    }
+
+    fn reload(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        self.ask(move || client.config(), Answer::Config)
+    }
+
+    /// Push the edited config back. The daemon sorts the points and applies the
+    /// result immediately, so there is nothing to apply separately.
+    fn push(&mut self) -> Task<Message> {
+        let Some(config) = self.config.clone() else {
+            return Task::none();
+        };
+
+        let client = self.client.clone();
+        self.ask(move || client.set_config(config), Answer::Acked)
+    }
+
+    /// Send the draft as it stands. The daemon works out which reports that
+    /// actually needs, so a brightness nudge does not restart an animation it
+    /// did not have to.
+    fn apply_light(&mut self) -> Task<Message> {
+        if self.lighting_out {
+            self.lighting_again = true;
+            return Task::none();
         }
+
+        self.lighting_out = true;
+
+        let client = self.client.clone();
+        let light = self.light;
+        self.ask(move || client.set_lighting(light), Answer::Light)
     }
 
-    /// Everything but the config goes through here: the reply is either a
-    /// warning worth showing or nothing worth saying.
     fn report(&mut self, outcome: Result<Option<Warning>, String>) {
         self.note = match outcome {
             Ok(Some(Warning {
                 code: WarningCode::ConfigReadOnly,
                 ..
             })) => None,
-            Ok(Some(Warning { message, .. })) => Some(message),
+            Ok(Some(Warning { message, .. })) => Some(Note::new(message)),
             Ok(None) => None,
-            Err(err) => Some(err),
+            Err(err) => Some(Note::new(err)),
         };
-    }
-
-    fn reload(&mut self) {
-        match self.client.config() {
-            Ok((config, writable)) => {
-                self.selected = self.selected.min(config.curves.len().saturating_sub(1));
-                self.config = Some(config);
-                self.writable = writable;
-            }
-            Err(err) => self.note = Some(err),
-        }
-    }
-
-    /// Push the edited config back. The daemon sorts the points and applies the
-    /// result immediately, so there is nothing to apply separately.
-    fn push(&mut self) {
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-
-        let outcome = self.client.set_config(config);
-        self.report(outcome);
-    }
-
-    /// Send the draft as it stands. The daemon works out which reports that
-    /// actually needs, so a brightness nudge does not restart an animation it
-    /// did not have to.
-    fn apply_light(&mut self) {
-        let outcome = self.client.set_lighting(self.light);
-        self.report(outcome);
     }
 
     fn ceiling(&self) -> u16 {
@@ -382,6 +439,32 @@ impl State {
             .and_then(|config| config.curves.get_mut(selected))
             .map(|curve| &mut curve.points)
     }
+}
+
+/// Do the work on a thread of its own and deliver the result as a message.
+fn offload<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+    answer: impl FnOnce(T) -> Answer + Send + 'static,
+) -> Task<Message> {
+    let started = std::time::Instant::now();
+
+    Task::perform(
+        async move {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(work());
+            });
+            rx.await
+        },
+        move |result| {
+            log::debug!("request answered in {} ms", started.elapsed().as_millis());
+
+            Message::Done(Box::new(match result {
+                Ok(value) => answer(value),
+                Err(_) => Answer::Acked(Err("the request never finished".to_string())),
+            }))
+        },
+    )
 }
 
 fn title(state: &State) -> String {
@@ -406,13 +489,42 @@ fn theme(state: &State) -> Option<Theme> {
 /// the interface through a channel. Identifying the subscription by the socket
 /// path means it restarts by itself if that ever changes.
 fn subscription(state: &State) -> Subscription<Message> {
-    Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates)
+    let updates = Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates);
+
+    // Frames are only worth asking for while something is moving.
+    if state.note.is_some() || state.busy() {
+        Subscription::batch([updates, iced::window::frames().map(|_| Message::Ticked)])
+    } else {
+        updates
+    }
 }
 
 /// Identity of the subscription, which iced compares to decide whether the
 /// running one still matches what the application asked for.
 #[derive(Hash)]
 struct Socket(PathBuf);
+
+/// Something worth saying once, and not worth a click to get rid of.
+#[derive(Debug, Clone)]
+struct Note {
+    text: String,
+    said: std::time::Instant,
+}
+
+impl Note {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            said: std::time::Instant::now(),
+        }
+    }
+
+    /// How much of its life is left, for the strip that counts it down.
+    fn left(&self) -> f32 {
+        let spent = self.said.elapsed().as_secs_f32() / NOTE_LIFE.as_secs_f32();
+        (1.0 - spent).clamp(0.0, 1.0)
+    }
+}
 
 fn updates(socket: &Socket) -> impl Stream<Item = Message> {
     let socket = socket.0.clone();
@@ -453,12 +565,53 @@ fn updates(socket: &Socket) -> impl Stream<Item = Message> {
     )
 }
 
-fn update(state: &mut State, message: Message) {
+fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Live(status) => {
-            if state.status.is_none() {
-                state.load_sensors();
+        Message::Done(answer) => {
+            state.pending = state.pending.saturating_sub(1);
 
+            if state.pending == 0 {
+                state.working_since = None;
+            }
+
+            match *answer {
+                Answer::Acked(outcome) => state.report(outcome),
+
+                Answer::Light(outcome) => {
+                    state.report(outcome);
+                    state.lighting_out = false;
+
+                    if state.lighting_again {
+                        state.lighting_again = false;
+                        return state.apply_light();
+                    }
+                }
+
+                Answer::Config(Ok((config, writable))) => {
+                    state.selected = state.selected.min(config.curves.len().saturating_sub(1));
+                    state.config = Some(config);
+                    state.writable = writable;
+                }
+
+                Answer::Gears(Ok(gears)) => state.gears = gears,
+
+                Answer::Sensors(Ok(sensors)) => {
+                    state.sensors = sensor_choices(&sensors);
+                    state.available = sensors;
+                }
+
+                Answer::Config(Err(err)) | Answer::Gears(Err(err)) | Answer::Sensors(Err(err)) => {
+                    state.note = Some(Note::new(err));
+                }
+            }
+
+            Task::none()
+        }
+
+        Message::Live(status) => {
+            let first = state.status.is_none();
+
+            if first {
                 if let Some(lighting) = status.lighting {
                     state.light = lighting;
                     if let LightMode::Static { color } = lighting.mode {
@@ -466,27 +619,44 @@ fn update(state: &mut State, message: Message) {
                     }
                 }
             }
+
+            // Drop the intent once the daemon reports the same thing, so a
+            // change made elsewhere is not held off the screen by it.
+            if state.manual_intent == Some(status.manual_rpm) {
+                state.manual_intent = None;
+            }
+
             state.status = Some(*status);
-            if state.config.is_none() {
-                state.reload();
+
+            // A daemon that just came back may be running a different config,
+            // and its sensors are its own to report.
+            if first {
+                Task::batch([state.reload(), state.load_sensors()])
+            } else {
+                Task::none()
             }
         }
 
         Message::Offline => {
             state.status = None;
             state.config = None;
+            Task::none()
         }
 
         Message::Reload => state.reload(),
 
-        Message::CurveSelected(index) => state.selected = index,
+        Message::CurveSelected(index) => {
+            state.selected = index;
+            state.name_draft = None;
+            Task::none()
+        }
 
         Message::PointAdded(point) => {
             if let Some(points) = state.points_mut() {
                 points.push(point);
                 points.sort_by_key(|point| point.temp_c);
             }
-            state.push();
+            state.push()
         }
 
         // Sorting mid-drag would renumber points under the hand dragging one.
@@ -496,6 +666,7 @@ fn update(state: &mut State, message: Message) {
                     *slot = point;
                 }
             }
+            Task::none()
         }
 
         Message::PointRemoved(index) => {
@@ -504,14 +675,14 @@ fn update(state: &mut State, message: Message) {
                     points.remove(index);
                 }
             }
-            state.push();
+            state.push()
         }
 
         Message::PointsSettled => {
             if let Some(points) = state.points_mut() {
                 points.sort_by_key(|point| point.temp_c);
             }
-            state.push();
+            state.push()
         }
 
         Message::ManualToggled(on) => {
@@ -524,24 +695,33 @@ fn update(state: &mut State, message: Message) {
                     .clamp(MIN_RPM, state.ceiling())
             });
 
-            state.manual_draft = None;
-            let outcome = state.client.set_manual(rpm);
-            state.report(outcome);
+            state.manual_intent = Some(rpm);
+
+            let client = state.client.clone();
+            state.ask(move || client.set_manual(rpm), Answer::Acked)
         }
 
-        Message::ManualChanged(rpm) => state.manual_draft = Some(rpm),
+        Message::ManualChanged(rpm) => {
+            state.manual_intent = Some(Some(rpm));
+            Task::none()
+        }
 
         Message::ManualCommitted => {
-            if let Some(rpm) = state.manual_draft.take() {
-                let outcome = state.client.set_manual(Some(rpm));
-                state.report(outcome);
-            }
+            let Some(Some(rpm)) = state.manual_intent else {
+                return Task::none();
+            };
+
+            let client = state.client.clone();
+            state.ask(move || client.set_manual(Some(rpm)), Answer::Acked)
         }
 
         Message::TabSelected(tab) => {
             state.tab = tab;
+
             if tab == Tab::Gears {
-                state.load_gears();
+                state.load_gears()
+            } else {
+                Task::none()
             }
         }
 
@@ -549,16 +729,19 @@ fn update(state: &mut State, message: Message) {
             if let Some(gear) = state.gears.get_mut(index) {
                 gear.rpm = rpm;
             }
+            Task::none()
         }
 
         Message::GearCommitted(index) => {
             let Some(gear) = state.gears.get(index).cloned() else {
-                return;
+                return Task::none();
             };
-            let outcome = state.client.set_gear(&gear.name, gear.rpm);
-            state.report(outcome);
 
-            state.load_gears();
+            let client = state.client.clone();
+            let write = state.ask(move || client.set_gear(&gear.name, gear.rpm), Answer::Acked);
+
+            // The cooler rounds what it stores, so read the table back.
+            Task::batch([write, state.load_gears()])
         }
 
         Message::CurveAdded => {
@@ -586,8 +769,9 @@ fn update(state: &mut State, message: Message) {
                 });
                 state.selected = config.curves.len() - 1;
             }
+
             state.name_draft = None;
-            state.push();
+            state.push()
         }
 
         Message::CurveRemoved => {
@@ -598,16 +782,21 @@ fn update(state: &mut State, message: Message) {
                     state.selected = state.selected.min(config.curves.len() - 1);
                 }
             }
+
             state.name_draft = None;
-            state.push();
+            state.push()
         }
 
-        Message::CurveRenamed(name) => state.name_draft = Some(name),
+        Message::CurveRenamed(name) => {
+            state.name_draft = Some(name);
+            Task::none()
+        }
 
         Message::CurveNameCommitted => {
             let Some(name) = state.name_draft.take() else {
-                return;
+                return Task::none();
             };
+
             let selected = state.selected;
             if let Some(curve) = state
                 .config
@@ -616,7 +805,8 @@ fn update(state: &mut State, message: Message) {
             {
                 curve.name = name.trim().to_string();
             }
-            state.push();
+
+            state.push()
         }
 
         Message::CurveSensorPicked(choice) => {
@@ -628,7 +818,8 @@ fn update(state: &mut State, message: Message) {
             {
                 curve.sensor = choice.sensor;
             }
-            state.push();
+
+            state.push()
         }
 
         Message::CurvePanicChanged(panic_c) => {
@@ -640,6 +831,7 @@ fn update(state: &mut State, message: Message) {
             {
                 curve.panic_c = Some(panic_c);
             }
+            Task::none()
         }
 
         Message::CurvePanicCommitted => state.push(),
@@ -649,6 +841,7 @@ fn update(state: &mut State, message: Message) {
             state.light.mode = LightMode::Static {
                 color: hsv.to_rgb(),
             };
+            Task::none()
         }
 
         Message::ColorCommitted => state.apply_light(),
@@ -658,26 +851,55 @@ fn update(state: &mut State, message: Message) {
             if let LightMode::Static { color } = mode {
                 state.picked = Hsv::from_rgb(color);
             }
-            state.apply_light();
+            state.apply_light()
         }
 
-        Message::BrightnessChanged(brightness) => state.light.brightness = brightness,
+        Message::BrightnessChanged(brightness) => {
+            state.light.brightness = brightness;
+            Task::none()
+        }
 
         Message::BrightnessCommitted => state.apply_light(),
 
         Message::IndicatorsToggled(on) => {
             state.light.indicators = on;
-            state.apply_light();
+            state.apply_light()
         }
-
-        Message::DismissNote => state.note = None,
 
         Message::StandbySelected(standby) => {
             if let Some(config) = state.config.as_mut() {
                 config.standby = Some(standby);
             }
-            let outcome = state.client.set_standby(standby);
-            state.report(outcome);
+
+            let client = state.client.clone();
+            state.ask(move || client.set_standby(standby), Answer::Acked)
+        }
+
+        // The daemon holds the config, and on NixOS the file it reads is a
+        // store path nobody can edit. Handing it over as text is what makes a
+        // curve dragged into shape here reusable anywhere else.
+        Message::ExportConfig => {
+            let Some(config) = state.config.as_ref() else {
+                return Task::none();
+            };
+
+            match toml::to_string_pretty(config) {
+                Ok(text) => {
+                    state.note = Some(Note::new("Configuration copied as TOML".to_string()));
+                    iced::clipboard::write(text)
+                }
+                Err(err) => {
+                    state.note = Some(Note::new(err.to_string()));
+                    Task::none()
+                }
+            }
+        }
+
+        Message::Ticked => {
+            if state.note.as_ref().is_some_and(|note| note.left() <= 0.0) {
+                state.note = None;
+            }
+            Task::none()
         }
     }
 }
@@ -705,14 +927,27 @@ fn view(state: &State) -> Element<'_, Message> {
         .padding(12);
 
     if state.config.is_some() && !state.writable {
-        screen = screen.push(banner(
-            "The daemon cannot save its config: changes apply now and are forgotten on restart",
-            None,
-        ));
+        screen = screen.push(
+            text("Changes apply now; the daemon cannot save them, so a restart forgets them")
+                .size(11),
+        );
     }
 
     if let Some(note) = &state.note {
-        screen = screen.push(banner(note, Some(Message::DismissNote)));
+        screen = screen.push(
+            container(
+                column![
+                    text(note.text.clone()).size(13),
+                    progress_bar(0.0..=1.0, note.left())
+                        .girth(2)
+                        .length(Length::Fill),
+                ]
+                .spacing(6),
+            )
+            .padding(10)
+            .width(Length::Fill)
+            .style(container::bordered_box),
+        );
     }
 
     screen.into()
@@ -728,7 +963,7 @@ fn speed_card(state: &State) -> Element<'_, Message> {
                     state.client.socket().display()
                 ))
                 .size(12),
-                button(text("Retry")).on_press(Message::Reload),
+                action("Retry", button::primary, Message::Reload),
             ]
             .spacing(8)
             .into(),
@@ -778,9 +1013,10 @@ fn speed_card(state: &State) -> Element<'_, Message> {
 }
 
 fn manual_card(state: &State) -> Element<'_, Message> {
-    let manual = state
-        .manual_draft
-        .or_else(|| state.status.as_ref().and_then(|status| status.manual_rpm));
+    let manual = match state.manual_intent {
+        Some(intent) => intent,
+        None => state.status.as_ref().and_then(|status| status.manual_rpm),
+    };
 
     let mut inner = column![checkbox(manual.is_some())
         .label("Hold a fixed speed")
@@ -807,10 +1043,10 @@ fn curve_list(state: &State) -> Element<'_, Message> {
 
     let mut list = column![row![
         text("Curves").size(15).width(Length::Fill),
-        button(text("Add"))
-            .style(button::secondary)
-            .on_press(Message::CurveAdded),
+        action("Export", button::secondary, Message::ExportConfig),
+        action("Add", button::secondary, Message::CurveAdded),
     ]
+    .spacing(6)
     .align_y(iced::Alignment::Center)]
     .spacing(6);
 
@@ -918,9 +1154,7 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
                 .width(Length::Fixed(200.0)),
                 pick_list(state.sensors.clone(), chosen, Message::CurveSensorPicked)
                     .width(Length::Fill),
-                button(text("Remove"))
-                    .style(button::danger)
-                    .on_press(Message::CurveRemoved),
+                action("Remove", button::danger, Message::CurveRemoved),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -947,22 +1181,40 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
 
 fn tabs(state: &State) -> Element<'_, Message> {
     let tab = |label: &'static str, which: Tab| {
-        button(text(label))
-            .style(if state.tab == which {
+        action(
+            label,
+            if state.tab == which {
                 button::primary
             } else {
                 button::secondary
-            })
-            .on_press(Message::TabSelected(which))
+            },
+            Message::TabSelected(which),
+        )
     };
 
-    row![
+    let mut bar = row![
         tab("Curve", Tab::Curve),
         tab("Gears", Tab::Gears),
         tab("Light", Tab::Light),
     ]
     .spacing(6)
-    .into()
+    .align_y(iced::Alignment::Center);
+
+    if let Some(since) = state.working_since {
+        bar = bar.push(
+            container(
+                canvas(spinner::Spinner {
+                    elapsed: since.elapsed().as_secs_f32(),
+                })
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(16.0)),
+            )
+            .width(Length::Fill)
+            .align_right(Length::Fill),
+        );
+    }
+
+    bar.into()
 }
 
 fn standby_card(state: &State) -> Element<'_, Message> {
@@ -985,12 +1237,16 @@ fn standby_card(state: &State) -> Element<'_, Message> {
 }
 
 fn gears_pane(state: &State) -> Element<'_, Message> {
+    if state.gears.is_empty() && state.busy() {
+        return card(text("Reading the gear table").size(15).into());
+    }
+
     if state.gears.is_empty() {
         return card(
             column![
                 text("No gear table").size(15),
                 text("The cooler answers this one itself, so it has to be connected").size(12),
-                button(text("Retry")).on_press(Message::TabSelected(Tab::Gears)),
+                action("Retry", button::primary, Message::TabSelected(Tab::Gears)),
             ]
             .spacing(8)
             .into(),
@@ -1036,14 +1292,19 @@ fn light_pane(state: &State) -> Element<'_, Message> {
     let showing = state.status.as_ref().and_then(|status| status.lighting);
     let strip_on = state.status.as_ref().and_then(|status| status.strip_on);
 
+    // Marked from the draft rather than from the status: lighting takes the
+    // cooler the best part of a second, and a button that only lights up once
+    // that is over reads as a click that did nothing.
     let mode = |label: String, which: LightMode| {
-        button(text(label))
-            .style(if showing.is_some_and(|showing| showing.mode == which) {
+        action(
+            label,
+            if state.light.mode == which {
                 button::primary
             } else {
                 button::secondary
-            })
-            .on_press(Message::ModePicked(which))
+            },
+            Message::ModePicked(which),
+        )
     };
 
     // Nothing can be asked what pattern the strip is playing, so when the
@@ -1140,22 +1401,12 @@ fn light_pane(state: &State) -> Element<'_, Message> {
     )
 }
 
-fn banner(message: &str, dismiss: Option<Message>) -> Element<'_, Message> {
-    let mut line = row![text(message.to_string()).size(13).width(Length::Fill)].spacing(8);
-
-    if let Some(dismiss) = dismiss {
-        line = line.push(
-            button(text("Dismiss"))
-                .style(button::secondary)
-                .on_press(dismiss),
-        );
-    }
-
-    container(line)
-        .padding(10)
-        .width(Length::Fill)
-        .style(container::bordered_box)
-        .into()
+fn action<'a>(
+    label: impl text::IntoFragment<'a>,
+    style: fn(&Theme, button::Status) -> button::Style,
+    message: Message,
+) -> iced::widget::Button<'a, Message> {
+    button(text(label)).style(style).on_press(message)
 }
 
 fn card(content: Element<'_, Message>) -> Element<'_, Message> {

@@ -9,27 +9,41 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flydigictl::config::Config;
 use flydigictl::ipc::{Gear, Reply, Request, SensorInfo, Status, Warning};
 use flydigictl::protocol::{Lighting, Standby};
 
-/// Long enough for a daemon busy talking to the cooler, short enough that a
-/// wedged one cannot freeze the window.
-const TIMEOUT: Duration = Duration::from_millis(500);
+/// Generous, because the daemon answers between its own turns at the cooler
+/// and a request can be queued behind another. Nothing waits on this but a
+/// worker thread, so the only thing a long timeout costs is a late error.
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Lighting is a burst of twenty-odd reports the daemon sends one at a time,
 /// so its answer is slow by construction rather than by fault.
-const LIGHT_TIMEOUT: Duration = Duration::from_secs(3);
+const LIGHT_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Clone)]
 pub struct Client {
     path: PathBuf,
+
+    /// One request at a time.
+    ///
+    /// The daemon serves them in turn anyway - it owns the cooler and talks to
+    /// it between frames - so firing several at once only means each one waits
+    /// on the others while its own clock runs down. Queueing here keeps a burst
+    /// of clicks from timing each other out.
+    turn: Arc<Mutex<()>>,
 }
 
 impl Client {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            turn: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn socket(&self) -> &Path {
@@ -114,6 +128,11 @@ impl Client {
     }
 
     fn request_within(&self, timeout: Duration, request: &Request) -> Result<Reply, String> {
+        let _turn = self
+            .turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let stream = UnixStream::connect(&self.path).map_err(connect_fault)?;
 
         stream.set_read_timeout(Some(timeout)).map_err(fault)?;
@@ -127,7 +146,12 @@ impl Client {
         let mut answer = String::new();
         BufReader::new(stream)
             .read_line(&mut answer)
-            .map_err(fault)?;
+            .map_err(|err| match err.kind() {
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                    format!("the daemon did not answer within {} s", timeout.as_secs())
+                }
+                _ => err.to_string(),
+            })?;
         if answer.trim().is_empty() {
             return Err("daemon closed the connection".to_string());
         }
