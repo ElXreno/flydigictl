@@ -131,123 +131,113 @@ impl std::fmt::Display for SensorChoice {
 /// a sandboxed daemon may be blind to sensors that are plainly there here, and
 /// offering one of those would build a curve that never reads anything.
 fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
-    // Chips of the same name need their address shown to be told apart. The
-    // rest read better without one.
-    let mut chips: std::collections::BTreeSet<(String, String)> = Default::default();
+    use std::collections::BTreeMap;
+
+    // Grouped by chip name, and inside a group by address, so that everything
+    // about one kind of sensor sits together: the entries that span all of them
+    // first, then each chip on its own. Sorted rather than left in discovery
+    // order, which is hwmon numbering and means nothing to a reader.
+    let mut chips: BTreeMap<&str, BTreeMap<&str, Vec<&ipc::SensorInfo>>> = BTreeMap::new();
     for entry in sensors {
-        chips.insert((entry.hwmon.clone(), entry.device.clone()));
+        chips
+            .entry(&entry.hwmon)
+            .or_default()
+            .entry(&entry.device)
+            .or_default()
+            .push(entry);
     }
-
-    let ambiguous: std::collections::BTreeSet<String> = chips
-        .iter()
-        .filter(|(hwmon, _)| chips.iter().filter(|(other, _)| other == hwmon).count() > 1)
-        .map(|(hwmon, _)| hwmon.clone())
-        .collect();
-
-    let named = |entry: &ipc::SensorInfo| {
-        if ambiguous.contains(&entry.hwmon) {
-            format!(
-                "{} {}",
-                entry.hwmon,
-                flydigictl::sensor::short_address(&entry.device)
-            )
-        } else {
-            entry.hwmon.clone()
-        }
-    };
 
     let mut choices: Vec<SensorChoice> = Vec::new();
-    let push = |choice: SensorChoice, choices: &mut Vec<SensorChoice>| {
-        if !choices
-            .iter()
-            .any(|existing| existing.sensor == choice.sensor)
-        {
-            choices.push(choice);
-        }
-    };
 
-    // Whole-name entries first: they leave the device empty, which matches
-    // every chip of that name and takes the hottest reading among them. That
-    // is what one curve over a pair of DIMMs or a pair of drives wants, and
-    // what a config written by hand usually says.
-    for entry in sensors {
-        let all = ambiguous.contains(&entry.hwmon);
+    for (hwmon, devices) in &chips {
+        let several = devices.len() > 1;
 
-        push(
-            SensorChoice {
-                label: if all {
-                    format!("{} (all, hottest)", entry.hwmon)
-                } else {
-                    format!("{} (hottest)", entry.hwmon)
-                },
+        let mut labels: Vec<&str> = devices
+            .values()
+            .flatten()
+            .map(|entry| entry.label.as_str())
+            .filter(|label| !label.is_empty())
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+
+        // The whole chip name, device left empty: matches every one of them and
+        // takes the hottest reading among them. What a curve over a pair of
+        // DIMMs or drives wants, and what a hand-written config usually says.
+        choices.push(SensorChoice {
+            label: if several {
+                format!("{hwmon} (all, hottest)")
+            } else {
+                format!("{hwmon} (hottest)")
+            },
+            sensor: Sensor {
+                hwmon: hwmon.to_string(),
+                device: String::new(),
+                label: String::new(),
+            },
+        });
+
+        for label in &labels {
+            let reading = (!several)
+                .then(|| {
+                    devices
+                        .values()
+                        .flatten()
+                        .find(|entry| entry.label == *label)
+                        .and_then(|entry| entry.temp_c)
+                })
+                .flatten();
+
+            choices.push(SensorChoice {
+                label: format!(
+                    "{hwmon}{}/{label}{}",
+                    if several { " (all)" } else { "" },
+                    reading.map_or(String::new(), |temp| format!("  {temp} C"))
+                ),
                 sensor: Sensor {
-                    hwmon: entry.hwmon.clone(),
+                    hwmon: hwmon.to_string(),
                     device: String::new(),
-                    label: String::new(),
+                    label: label.to_string(),
                 },
-            },
-            &mut choices,
-        );
-
-        if !entry.label.is_empty() {
-            push(
-                SensorChoice {
-                    label: if all {
-                        format!("{} (all)/{}", entry.hwmon, entry.label)
-                    } else {
-                        format!(
-                            "{}/{}{}",
-                            entry.hwmon,
-                            entry.label,
-                            entry
-                                .temp_c
-                                .map_or(String::new(), |temp| format!("  {temp} C"))
-                        )
-                    },
-                    sensor: Sensor {
-                        hwmon: entry.hwmon.clone(),
-                        device: String::new(),
-                        label: entry.label.clone(),
-                    },
-                },
-                &mut choices,
-            );
+            });
         }
-    }
 
-    // Then one chip at a time, for picking out a particular drive or stick.
-    for entry in sensors.iter().filter(|e| ambiguous.contains(&e.hwmon)) {
-        push(
-            SensorChoice {
-                label: format!("{} (hottest)", named(entry)),
+        if !several {
+            continue;
+        }
+
+        for (device, entries) in devices {
+            let named = format!("{hwmon} {}", flydigictl::sensor::short_address(device));
+
+            choices.push(SensorChoice {
+                label: format!("{named} (hottest)"),
                 sensor: Sensor {
-                    hwmon: entry.hwmon.clone(),
-                    device: entry.device.clone(),
+                    hwmon: hwmon.to_string(),
+                    device: device.to_string(),
                     label: String::new(),
                 },
-            },
-            &mut choices,
-        );
+            });
 
-        if !entry.label.is_empty() {
-            push(
-                SensorChoice {
+            for entry in entries {
+                if entry.label.is_empty() {
+                    continue;
+                }
+
+                choices.push(SensorChoice {
                     label: format!(
-                        "{}/{}{}",
-                        named(entry),
+                        "{named}/{}{}",
                         entry.label,
                         entry
                             .temp_c
                             .map_or(String::new(), |temp| format!("  {temp} C"))
                     ),
                     sensor: Sensor {
-                        hwmon: entry.hwmon.clone(),
-                        device: entry.device.clone(),
+                        hwmon: hwmon.to_string(),
+                        device: device.to_string(),
                         label: entry.label.clone(),
                     },
-                },
-                &mut choices,
-            );
+                });
+            }
         }
     }
 
