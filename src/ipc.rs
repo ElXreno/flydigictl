@@ -78,8 +78,10 @@ pub enum Reply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorInfo {
     pub hwmon: String,
-    /// Kernel device behind the chip, which is what tells two of a kind apart.
+    /// Stable address of the chip, which is what tells two of a kind apart.
     pub device: String,
+    /// What the kernel calls it at the moment, for showing rather than storing.
+    pub kernel: String,
     /// Empty when the input has no label of its own.
     pub label: String,
     pub temp_c: Option<u8>,

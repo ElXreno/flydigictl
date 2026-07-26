@@ -144,9 +144,15 @@ fn sensor_choices(sensors: Vec<ipc::SensorInfo>) -> Vec<SensorChoice> {
         .map(|(hwmon, _)| hwmon.clone())
         .collect();
 
+    // The address is what gets stored; what gets shown is its readable tail,
+    // and only where the hwmon name alone would be ambiguous.
     let name = |entry: &ipc::SensorInfo| {
         if ambiguous.contains(&entry.hwmon) && !entry.device.is_empty() {
-            format!("{} {}", entry.hwmon, entry.device)
+            format!(
+                "{} {}",
+                entry.hwmon,
+                flydigictl::sensor::short_address(&entry.device)
+            )
         } else {
             entry.hwmon.clone()
         }
