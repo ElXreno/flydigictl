@@ -62,7 +62,10 @@ enum Message {
     /// The pointer was released: the drag is over and the change can go out.
     PointsSettled,
     ManualToggled(bool),
+    /// Dragging: local only, because the socket call is blocking and doing one
+    /// per pixel of travel makes the slider crawl.
     ManualChanged(u16),
+    ManualCommitted,
     Reload,
 
     TabSelected(Tab),
@@ -353,8 +356,14 @@ fn update(state: &mut State, message: Message) {
             if let Some(config) = state.config.as_mut() {
                 config.manual_rpm = Some(rpm);
             }
-            let outcome = state.client.set_manual(Some(rpm));
-            state.report(outcome);
+        }
+
+        Message::ManualCommitted => {
+            let rpm = state.config.as_ref().and_then(|config| config.manual_rpm);
+            if let Some(rpm) = rpm {
+                let outcome = state.client.set_manual(Some(rpm));
+                state.report(outcome);
+            }
         }
 
         Message::TabSelected(tab) => {
@@ -534,8 +543,11 @@ fn manual_card(state: &State) -> Element<'_, Message> {
     if let Some(rpm) = manual {
         let ceiling = state.ceiling();
         inner = inner.push(text(format!("{rpm} rpm")).size(13));
-        inner = inner
-            .push(slider(MIN_RPM..=ceiling, rpm.min(ceiling), Message::ManualChanged).step(50u16));
+        inner = inner.push(
+            slider(MIN_RPM..=ceiling, rpm.min(ceiling), Message::ManualChanged)
+                .step(50u16)
+                .on_release(Message::ManualCommitted),
+        );
     }
 
     card(inner.into())
