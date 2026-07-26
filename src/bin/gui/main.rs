@@ -137,6 +137,11 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
     // about one kind of sensor sits together: the entries that span all of them
     // first, then each chip on its own. Sorted rather than left in discovery
     // order, which is hwmon numbering and means nothing to a reader.
+    //
+    // No readings here on purpose. The list is built once per connection, so
+    // any number in it goes stale within seconds - and worse, sits stale in the
+    // closed picker. What a sensor is doing belongs to the curve list and the
+    // graph, both of which are live.
     let mut chips: BTreeMap<&str, BTreeMap<&str, Vec<&ipc::SensorInfo>>> = BTreeMap::new();
     for entry in sensors {
         chips
@@ -178,22 +183,8 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
         });
 
         for label in &labels {
-            let reading = (!several)
-                .then(|| {
-                    devices
-                        .values()
-                        .flatten()
-                        .find(|entry| entry.label == *label)
-                        .and_then(|entry| entry.temp_c)
-                })
-                .flatten();
-
             choices.push(SensorChoice {
-                label: format!(
-                    "{hwmon}{}/{label}{}",
-                    if several { " (all)" } else { "" },
-                    reading.map_or(String::new(), |temp| format!("  {temp} C"))
-                ),
+                label: format!("{hwmon}{}/{label}", if several { " (all)" } else { "" }),
                 sensor: Sensor {
                     hwmon: hwmon.to_string(),
                     device: String::new(),
@@ -224,13 +215,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
                 }
 
                 choices.push(SensorChoice {
-                    label: format!(
-                        "{named}/{}{}",
-                        entry.label,
-                        entry
-                            .temp_c
-                            .map_or(String::new(), |temp| format!("  {temp} C"))
-                    ),
+                    label: format!("{named}/{}", entry.label),
                     sensor: Sensor {
                         hwmon: hwmon.to_string(),
                         device: device.to_string(),
