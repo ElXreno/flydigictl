@@ -237,10 +237,20 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | `{"request":"get_config"}` | config in force, plus whether it can be saved |
 | `{"request":"set_config","config":{...}}` | replace the config |
 | `{"request":"set_manual","rpm":1500}` | hold a speed; `"rpm":null` returns to the curves |
+| `{"request":"sensors"}` | temperature inputs the daemon can read, with their current readings |
 | `{"request":"gears"}` | the four speeds stored in the cooler, and whether the supply allows each |
 | `{"request":"set_gear","gear":"quiet","rpm":1500}` | rewrite one of them |
 | `{"request":"light","light":{"light":"effect","mode":3}}` | lighting: `off`, `static`, `effect`, `indicators` |
 | `{"request":"set_standby","standby":"delayed"}` | what the cooler does once the host goes away |
+
+Ask the daemon for the sensor list rather than reading `/sys/class/hwmon`
+directly. The two can disagree: systemd's `PrivateNetwork=` gives a service its
+own network namespace, sysfs is tagged by namespace, and every hwmon belonging
+to a network device - a Wi-Fi card's temperature, for instance - vanishes from
+the service's view while remaining plainly visible to everyone else. A curve
+built on one of those never reads anything. The unit here does not use
+`PrivateNetwork=` for exactly that reason, and `RestrictAddressFamilies=AF_UNIX`
+already stops the daemon opening a network socket.
 
 Everything below `set_manual` reaches the cooler through the daemon rather than
 around it: it owns the device, and a second process writing to the same hidraw

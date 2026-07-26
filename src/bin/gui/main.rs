@@ -19,7 +19,6 @@ use flydigictl::config::{Config, Curve, Point, Sensor};
 use flydigictl::curve;
 use flydigictl::ipc::{self, Status, Warning, WarningCode};
 use flydigictl::protocol::{LightMode, Lighting, Rgb, Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
-use flydigictl::sensor;
 
 use picker::Hsv;
 
@@ -124,13 +123,17 @@ impl std::fmt::Display for SensorChoice {
     }
 }
 
-/// Every hwmon on the machine, plus a whole-hwmon entry for each: an empty
+/// Every hwmon the daemon can read, plus a whole-hwmon entry for each: an empty
 /// label means "the hottest input of this chip", which is what covers a pair
 /// of DIMMs or two drives with one curve.
-fn sensor_choices() -> Vec<SensorChoice> {
+///
+/// The list comes from the daemon and not from this process. They can disagree:
+/// a sandboxed daemon may be blind to sensors that are plainly there here, and
+/// offering one of those would build a curve that never reads anything.
+fn sensor_choices(sensors: Vec<ipc::SensorInfo>) -> Vec<SensorChoice> {
     let mut choices: Vec<SensorChoice> = Vec::new();
 
-    for entry in sensor::list() {
+    for entry in sensors {
         let whole = SensorChoice {
             label: format!("{} (hottest)", entry.hwmon),
             sensor: Sensor {
@@ -207,11 +210,19 @@ impl State {
                 g: 0xA2,
                 b: 0xF7,
             }),
-            sensors: sensor_choices(),
+            sensors: Vec::new(),
             name_draft: None,
         };
         state.reload();
+        state.load_sensors();
         state
+    }
+
+    fn load_sensors(&mut self) {
+        match self.client.sensors() {
+            Ok(sensors) => self.sensors = sensor_choices(sensors),
+            Err(err) => self.note = Some(err),
+        }
     }
 
     fn load_gears(&mut self) {
@@ -353,6 +364,8 @@ fn update(state: &mut State, message: Message) {
             // The cooler cannot be asked what it is showing, so the daemon's
             // record is the only starting point the controls have.
             if state.status.is_none() {
+                state.load_sensors();
+
                 if let Some(lighting) = status.lighting {
                     state.light = lighting;
                     if let LightMode::Static { color } = lighting.mode {

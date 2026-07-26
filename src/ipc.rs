@@ -28,6 +28,13 @@ pub enum Request {
     SetConfig { config: Config },
     /// Hold a fixed speed; `null` returns to the curve.
     SetManual { rpm: Option<u16> },
+    /// Temperature inputs the daemon itself can read.
+    ///
+    /// Asked of the daemon rather than looked up by the client, because the two
+    /// do not necessarily see the same sysfs: a sandboxed daemon can be blind
+    /// to sensors that are plainly there for everyone else, and offering those
+    /// as curve sources produces a curve that never reads anything.
+    Sensors,
     /// The four speeds stored in the cooler.
     Gears,
     /// Rewrite one of them. Named rather than numbered so a client does not
@@ -50,6 +57,9 @@ pub enum Reply {
     Gears {
         gears: Vec<Gear>,
     },
+    Sensors {
+        sensors: Vec<SensorInfo>,
+    },
     Config {
         config: Config,
         /// False when the daemon cannot persist changes, e.g. a NixOS store path.
@@ -62,6 +72,15 @@ pub enum Reply {
     Error {
         message: String,
     },
+}
+
+/// A temperature input, as the daemon sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorInfo {
+    pub hwmon: String,
+    /// Empty when the input has no label of its own.
+    pub label: String,
+    pub temp_c: Option<u8>,
 }
 
 /// One stored gear speed.
