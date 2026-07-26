@@ -33,23 +33,14 @@ pub enum Request {
     /// Rewrite one of them. Named rather than numbered so a client does not
     /// have to know the order the firmware keeps them in.
     SetGear { gear: String, rpm: u16 },
-    /// Drive the lighting.
-    Light { light: Light },
+    /// Set the lighting, all of it at once.
+    ///
+    /// The whole state rather than one knob at a time, because the cooler has
+    /// no way to report what it is showing: a client that could only say
+    /// "brightness 40" would be asking the daemon to guess the rest.
+    SetLighting { lighting: crate::protocol::Lighting },
     /// What the cooler should do on its own once the host goes away.
     SetStandby { standby: crate::protocol::Standby },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "light", rename_all = "snake_case")]
-pub enum Light {
-    /// Turn the side strip off.
-    Off,
-    /// Paint it a single colour, `rrggbb` with or without a leading hash.
-    Static { color: String, brightness: u8 },
-    /// Play one of the firmware's own animations, 1 to 5.
-    Effect { mode: u8 },
-    /// The gear indicator LEDs, which are a separate light entirely.
-    Indicators { on: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +112,7 @@ impl Status {
             manual: false,
             supply: None,
             supply_max_rpm: None,
+            lighting: crate::protocol::Lighting::default(),
             leading: None,
             demands: Vec::new(),
         }
@@ -142,6 +134,10 @@ pub struct Status {
     /// The speed the supply allows. A target above this is clamped by the
     /// firmware, so a client showing the curve should show this line too.
     pub supply_max_rpm: Option<u16>,
+
+    /// What the daemon last told the lighting to do, which is the only record
+    /// of it that exists.
+    pub lighting: crate::protocol::Lighting,
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,

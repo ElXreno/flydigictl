@@ -154,6 +154,10 @@ struct LightEffectCmd {
     /// effect number, 1-5
     #[argh(positional)]
     mode: u8,
+
+    /// brightness percentage, 0-100 (default: 100)
+    #[argh(option, short = 'b', default = "100")]
+    brightness: u8,
 }
 
 /// toggle the gear indicator LEDs
@@ -431,11 +435,11 @@ fn run() -> Result<()> {
                     });
                 }
 
-                for report in protocol::light_effect(cmd.mode) {
+                for report in protocol::light_effect(cmd.mode, cmd.brightness) {
                     dev.send_acked(report, ACK_TIMEOUT)?;
                     std::thread::sleep(LIGHT_GAP);
                 }
-                info!("effect {}", cmd.mode);
+                info!("effect {} at {}%", cmd.mode, cmd.brightness);
             }
 
             LightWhat::Static(cmd) => {
