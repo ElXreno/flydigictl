@@ -151,6 +151,14 @@ Setting a fixed speed is `0x23` followed by `0x21`:
 02 5A A5 24 02 26                 back to gear mode
 ```
 
+`0x21` answers `01` when it took the speed and `02` when it did not, which it
+does whenever the cooler is not in realtime mode. The report is acknowledged
+either way, so a client that only checks for a reply will believe a speed it
+never set. The status frame settles the question: bytes 10-11 carry the speed
+the cooler was told to hold, written by nothing but this command, so comparing
+them against what was sent is how a divergence gets noticed at all - whether it
+came from a refused write, another client, or the button on the case.
+
 Realtime mode is an override layered on the selected gear, not a separate
 mode: the gear LEDs blink while it is active and return to showing the selected
 gear afterwards. The firmware ramps the fan itself at roughly 60 RPM/s, so a
