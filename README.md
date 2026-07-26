@@ -243,6 +243,23 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | `{"request":"light","light":{"light":"effect","mode":3}}` | lighting: `off`, `static`, `effect`, `indicators` |
 | `{"request":"set_standby","standby":"delayed"}` | what the cooler does once the host goes away |
 
+A curve names its sensor by hwmon, device and label, and an empty field matches
+anything - no label takes the hottest input of that chip, which is how one curve
+covers both DIMMs. The device is a **stable address** rather than a kernel name:
+
+```console
+$ flydigictl sensors
+nvme       0000:05:00.0 (nvme0)        Composite   37 C
+nvme       0000:02:00.0 (nvme1)        Composite   39 C
+spd5118    0000:00:14.0/0050 (21-0050) -           49 C
+```
+
+`nvme0` and `nvme1` are handed out in probe order and do swap between boots, so
+a config written against them can end up watching the other drive. The address
+is the PCI slot the chip sits in, plus its i2c address where several chips share
+one bus - two memory sticks on the same SMBus differ only by that. A hand-written
+`device = "nvme0"` still matches, it is simply not dependable.
+
 Ask the daemon for the sensor list rather than reading `/sys/class/hwmon`
 directly. The two can disagree: systemd's `PrivateNetwork=` gives a service its
 own network namespace, sysfs is tagged by namespace, and every hwmon belonging

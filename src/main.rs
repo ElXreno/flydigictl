@@ -238,12 +238,14 @@ fn run() -> Result<()> {
         for entry in available {
             let temp = flydigictl::sensor::read(&entry.path);
             println!(
-                "{:<24} {:<12} {:<12} {}",
+                "{:<24} {:<20} {:<12} {}",
                 entry.hwmon,
                 if entry.device.is_empty() {
-                    "-"
+                    "-".to_string()
+                } else if entry.device == entry.kernel {
+                    entry.device.clone()
                 } else {
-                    &entry.device
+                    format!("{} ({})", entry.device, entry.kernel)
                 },
                 if entry.label.is_empty() {
                     "-"

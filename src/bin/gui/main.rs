@@ -130,69 +130,116 @@ impl std::fmt::Display for SensorChoice {
 /// The list comes from the daemon and not from this process. They can disagree:
 /// a sandboxed daemon may be blind to sensors that are plainly there here, and
 /// offering one of those would build a curve that never reads anything.
-fn sensor_choices(sensors: Vec<ipc::SensorInfo>) -> Vec<SensorChoice> {
-    // Two of the same part share a hwmon name, so those entries need the
-    // device to tell them apart. Everything else reads better without it.
-    let mut chips: std::collections::BTreeSet<(String, String)> = Default::default();
-    for entry in &sensors {
-        chips.insert((entry.hwmon.clone(), entry.device.clone()));
+fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
+    use std::collections::BTreeMap;
+
+    // Grouped by chip name, and inside a group by address, so that everything
+    // about one kind of sensor sits together: the entries that span all of them
+    // first, then each chip on its own. Sorted rather than left in discovery
+    // order, which is hwmon numbering and means nothing to a reader.
+    //
+    // No readings here on purpose. The list is built once per connection, so
+    // any number in it goes stale within seconds - and worse, sits stale in the
+    // closed picker. What a sensor is doing belongs to the curve list and the
+    // graph, both of which are live.
+    let mut chips: BTreeMap<&str, BTreeMap<&str, Vec<&ipc::SensorInfo>>> = BTreeMap::new();
+    for entry in sensors {
+        chips
+            .entry(&entry.hwmon)
+            .or_default()
+            .entry(&entry.device)
+            .or_default()
+            .push(entry);
     }
-
-    let ambiguous: std::collections::BTreeSet<String> = chips
-        .iter()
-        .filter(|(hwmon, _)| chips.iter().filter(|(other, _)| other == hwmon).count() > 1)
-        .map(|(hwmon, _)| hwmon.clone())
-        .collect();
-
-    let name = |entry: &ipc::SensorInfo| {
-        if ambiguous.contains(&entry.hwmon) && !entry.device.is_empty() {
-            format!("{} {}", entry.hwmon, entry.device)
-        } else {
-            entry.hwmon.clone()
-        }
-    };
 
     let mut choices: Vec<SensorChoice> = Vec::new();
 
-    for entry in &sensors {
-        // One entry per chip standing for all of its inputs: an empty label
-        // takes the hottest, which is what covers a pair of DIMMs at once.
-        let whole = SensorChoice {
-            label: format!("{} (hottest)", name(entry)),
+    for (hwmon, devices) in &chips {
+        let several = devices.len() > 1;
+
+        let mut labels: Vec<&str> = devices
+            .values()
+            .flatten()
+            .map(|entry| entry.label.as_str())
+            .filter(|label| !label.is_empty())
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+
+        // The whole chip name, device left empty: matches every one of them and
+        // takes the hottest reading among them. What a curve over a pair of
+        // DIMMs or drives wants, and what a hand-written config usually says.
+        choices.push(SensorChoice {
+            label: if several {
+                format!("{hwmon} (all, hottest)")
+            } else {
+                format!("{hwmon} (hottest)")
+            },
             sensor: Sensor {
-                hwmon: entry.hwmon.clone(),
-                device: if ambiguous.contains(&entry.hwmon) {
-                    entry.device.clone()
-                } else {
-                    String::new()
-                },
+                hwmon: hwmon.to_string(),
+                device: String::new(),
                 label: String::new(),
             },
-        };
-        if !choices.contains(&whole) {
-            choices.push(whole);
-        }
+        });
 
-        if !entry.label.is_empty() {
+        for label in &labels {
             choices.push(SensorChoice {
-                label: format!(
-                    "{}/{}{}",
-                    name(entry),
-                    entry.label,
-                    entry
-                        .temp_c
-                        .map_or(String::new(), |temp| format!("  {temp} C"))
-                ),
+                label: format!("{hwmon}{}/{label}", if several { " (all)" } else { "" }),
                 sensor: Sensor {
-                    hwmon: entry.hwmon.clone(),
-                    device: entry.device.clone(),
-                    label: entry.label.clone(),
+                    hwmon: hwmon.to_string(),
+                    device: String::new(),
+                    label: label.to_string(),
                 },
             });
+        }
+
+        if !several {
+            continue;
+        }
+
+        for (device, entries) in devices {
+            let named = format!("{hwmon} {}", flydigictl::sensor::short_address(device));
+
+            choices.push(SensorChoice {
+                label: format!("{named} (hottest)"),
+                sensor: Sensor {
+                    hwmon: hwmon.to_string(),
+                    device: device.to_string(),
+                    label: String::new(),
+                },
+            });
+
+            for entry in entries {
+                if entry.label.is_empty() {
+                    continue;
+                }
+
+                choices.push(SensorChoice {
+                    label: format!("{named}/{}", entry.label),
+                    sensor: Sensor {
+                        hwmon: hwmon.to_string(),
+                        device: device.to_string(),
+                        label: entry.label.clone(),
+                    },
+                });
+            }
         }
     }
 
     choices
+}
+
+/// Does the daemon have anything this curve would read?
+///
+/// The same matching the daemon does: an empty field accepts anything.
+fn sensor_exists(sensors: &[ipc::SensorInfo], sensor: &Sensor) -> bool {
+    sensors.iter().any(|entry| {
+        entry.hwmon == sensor.hwmon
+            && (sensor.device.is_empty()
+                || entry.device == sensor.device
+                || entry.kernel == sensor.device)
+            && (sensor.label.is_empty() || entry.label == sensor.label)
+    })
 }
 
 struct State {
@@ -226,6 +273,8 @@ struct State {
     /// curve points: one socket round trip per pixel is unusable.
     manual_draft: Option<u16>,
 
+    /// As the daemon reports them, and the choices built from that.
+    available: Vec<ipc::SensorInfo>,
     sensors: Vec<SensorChoice>,
     /// Held while it is being typed, because sending on every keystroke means
     /// a socket round trip per letter.
@@ -251,6 +300,7 @@ impl State {
                 b: 0xF7,
             }),
             manual_draft: None,
+            available: Vec::new(),
             sensors: Vec::new(),
             name_draft: None,
         };
@@ -261,7 +311,10 @@ impl State {
 
     fn load_sensors(&mut self) {
         match self.client.sensors() {
-            Ok(sensors) => self.sensors = sensor_choices(sensors),
+            Ok(sensors) => {
+                self.sensors = sensor_choices(&sensors);
+                self.available = sensors;
+            }
             Err(err) => self.note = Some(err),
         }
     }
@@ -848,10 +901,17 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
         .find(|choice| choice.sensor == curve.sensor)
         .cloned()
         .or_else(|| {
-            // A curve can name a sensor this machine does not have, and the
-            // picker should say so rather than look empty.
+            // A curve can address something the picker has no entry for: a
+            // sensor this machine does not have, or one written by hand in a
+            // form the list does not offer. Only the first deserves a warning.
+            let known = sensor_exists(&state.available, &curve.sensor);
+
             Some(SensorChoice {
-                label: format!("{sensor} (missing)"),
+                label: if known {
+                    sensor.clone()
+                } else {
+                    format!("{sensor} (missing)")
+                },
                 sensor: curve.sensor.clone(),
             })
         });

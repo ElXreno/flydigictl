@@ -572,6 +572,7 @@ fn control_loop(
                             .map(|entry| ipc::SensorInfo {
                                 hwmon: entry.hwmon,
                                 device: entry.device,
+                                kernel: entry.kernel,
                                 label: entry.label,
                                 temp_c: sensor::read(&entry.path),
                             })
