@@ -478,6 +478,15 @@ fn control_loop(
     // that means a re-enumeration anyway.
     let mut supply: Option<protocol::Supply> = None;
     let mut strip_on: Option<bool> = None;
+
+    // Seeded from the config and then owned by the daemon.
+    //
+    // Deliberately not left in the config struct: a client replaces that
+    // wholesale with `set_config`, so a stale copy of it - and every client
+    // holds one - would silently undo a lighting or speed change made since it
+    // last read the config.
+    let mut manual_rpm = config.manual_rpm;
+    let mut lighting = config.lighting;
     let mut warned_about_supply = false;
 
     for event in rx {
@@ -486,6 +495,19 @@ fn control_loop(
                 Ok(fresh) => {
                     if fresh != *config {
                         info!("config reloaded from {}", config_path.display());
+
+                        // A rebuild is somebody stating intent, so declared
+                        // values win over what this session was asked for.
+                        if fresh.manual_rpm != config.manual_rpm {
+                            manual_rpm = fresh.manual_rpm;
+                        }
+                        if fresh.lighting != config.lighting {
+                            lighting = fresh.lighting;
+                            if let (Some(dev), Some(lighting)) = (device.as_mut(), lighting) {
+                                let _ = send_all(dev, lighting.reports(None));
+                            }
+                        }
+
                         *config = fresh;
                         curves = Curves::build(config);
                         applied = None;
@@ -507,6 +529,8 @@ fn control_loop(
 
                     Request::SetConfig { config: fresh } => {
                         *config = fresh;
+                        config.manual_rpm = manual_rpm;
+                        config.lighting = lighting;
                         for curve in &mut config.curves {
                             curve.points.sort_by_key(|point| point.temp_c);
                         }
@@ -522,13 +546,11 @@ fn control_loop(
                             }
                         }
                         rpm => {
+                            manual_rpm = rpm;
                             config.manual_rpm = rpm;
                             applied = None;
-                            let reply = persist(config, config_path, writable);
+                            let reply = Reply::Ok { warning: None };
 
-                            // A read-only config is a standing fact a client
-                            // also learns from `get_config`, while this one is
-                            // about the speed just requested, so it wins.
                             match (rpm, supply) {
                                 (Some(rpm), Some(supply)) if rpm > supply.max_rpm() => Reply::Ok {
                                     warning: Some(Warning {
@@ -549,6 +571,7 @@ fn control_loop(
                             .into_iter()
                             .map(|entry| ipc::SensorInfo {
                                 hwmon: entry.hwmon,
+                                device: entry.device,
                                 label: entry.label,
                                 temp_c: sensor::read(&entry.path),
                             })
@@ -569,19 +592,20 @@ fn control_loop(
                         Some(dev) => set_gear(dev, supply, &gear, rpm),
                     },
 
-                    Request::SetLighting { lighting } => match device.as_mut() {
+                    Request::SetLighting { lighting: wanted } => match device.as_mut() {
                         None => Reply::Error {
                             message: "no cooler".to_string(),
                         },
                         Some(dev) => {
-                            let reports = lighting.reports(config.lighting.as_ref());
+                            let reports = wanted.reports(lighting.as_ref());
 
                             match send_all(dev, reports) {
                                 Reply::Ok { .. } => {
-                                    info!("lighting {lighting}");
-                                    config.lighting = Some(lighting);
-                                    strip_on = Some(lighting.mode != protocol::LightMode::Off);
-                                    persist(config, config_path, writable)
+                                    info!("lighting {wanted}");
+                                    lighting = Some(wanted);
+                                    config.lighting = lighting;
+                                    strip_on = Some(wanted.mode != protocol::LightMode::Off);
+                                    Reply::Ok { warning: None }
                                 }
                                 failure => failure,
                             }
@@ -649,7 +673,7 @@ fn control_loop(
                             .ok()
                             .and_then(|payload| payload.first().map(|byte| *byte != 0));
 
-                        if let Some(lighting) = config.lighting {
+                        if let Some(lighting) = lighting {
                             match send_all(dev, lighting.reports(None)) {
                                 Reply::Ok { .. } => info!("lighting {lighting}"),
                                 other => warn!("cannot set the lighting: {other:?}"),
@@ -702,7 +726,7 @@ fn control_loop(
                         }
 
                         // A manual speed overrides every curve, by design.
-                        let asked = config.manual_rpm.or(leader.as_ref().map(|d| d.rpm));
+                        let asked = manual_rpm.or(leader.as_ref().map(|d| d.rpm));
 
                         // Sending more than the supply allows is not an error,
                         // the firmware just holds its ceiling - but then every
@@ -760,10 +784,11 @@ fn control_loop(
                                 temp_c: leader.as_ref().map(|d| d.temp_c),
                                 current_rpm: Some(status.current_rpm),
                                 target_rpm: applied.or(Some(status.target_rpm)),
-                                manual: config.manual_rpm.is_some(),
+                                manual: manual_rpm.is_some(),
+                                manual_rpm,
                                 supply: supply.map(|supply| supply.to_string()),
                                 supply_max_rpm: supply.map(|supply| supply.max_rpm()),
-                                lighting: config.lighting,
+                                lighting,
                                 strip_on,
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 demands: demands.clone(),
