@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::widget::{
-    button, canvas, checkbox, column, container, pick_list, row, scrollable, slider, text,
-    text_input,
+    button, canvas, checkbox, column, container, pick_list, progress_bar, row, scrollable, slider,
+    text, text_input,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 
@@ -26,6 +26,9 @@ use client::Client;
 
 /// How long to wait before dialling a daemon that is not there yet.
 const RECONNECT: Duration = Duration::from_secs(1);
+
+/// How long a note stays up before it takes itself away.
+const NOTE_LIFE: Duration = Duration::from_secs(6);
 
 /// Control a Flydigi BS series cooler
 #[derive(argh::FromArgs)]
@@ -106,7 +109,8 @@ enum Message {
 
     StandbySelected(Standby),
     ExportConfig,
-    DismissNote,
+    /// A frame went by, which is how the note knows its time is up.
+    Ticked,
 
     /// A request the interface sent has come back.
     Done(Box<Answer>),
@@ -269,7 +273,7 @@ struct State {
     /// whether or not the last click succeeded, so it is drawn from `writable`
     /// instead - keeping it here meant the next successful command wiped a
     /// warning that was still true.
-    note: Option<String>,
+    note: Option<Note>,
 
     /// Read once at startup: the file behind it is written by a scheme
     /// generator, and those do not change it while a window is open.
@@ -385,9 +389,9 @@ impl State {
                 code: WarningCode::ConfigReadOnly,
                 ..
             })) => None,
-            Ok(Some(Warning { message, .. })) => Some(message),
+            Ok(Some(Warning { message, .. })) => Some(Note::new(message)),
             Ok(None) => None,
-            Err(err) => Some(err),
+            Err(err) => Some(Note::new(err)),
         };
     }
 
@@ -451,13 +455,42 @@ fn theme(state: &State) -> Option<Theme> {
 /// the interface through a channel. Identifying the subscription by the socket
 /// path means it restarts by itself if that ever changes.
 fn subscription(state: &State) -> Subscription<Message> {
-    Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates)
+    let updates = Subscription::run_with(Socket(state.client.socket().to_path_buf()), updates);
+
+    // Frames are only worth asking for while a note is counting itself down.
+    if state.note.is_some() {
+        Subscription::batch([updates, iced::window::frames().map(|_| Message::Ticked)])
+    } else {
+        updates
+    }
 }
 
 /// Identity of the subscription, which iced compares to decide whether the
 /// running one still matches what the application asked for.
 #[derive(Hash)]
 struct Socket(PathBuf);
+
+/// Something worth saying once, and not worth a click to get rid of.
+#[derive(Debug, Clone)]
+struct Note {
+    text: String,
+    said: std::time::Instant,
+}
+
+impl Note {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            said: std::time::Instant::now(),
+        }
+    }
+
+    /// How much of its life is left, for the strip that counts it down.
+    fn left(&self) -> f32 {
+        let spent = self.said.elapsed().as_secs_f32() / NOTE_LIFE.as_secs_f32();
+        (1.0 - spent).clamp(0.0, 1.0)
+    }
+}
 
 fn updates(socket: &Socket) -> impl Stream<Item = Message> {
     let socket = socket.0.clone();
@@ -520,7 +553,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
 
                 Answer::Config(Err(err)) | Answer::Gears(Err(err)) | Answer::Sensors(Err(err)) => {
-                    state.note = Some(err);
+                    state.note = Some(Note::new(err));
                 }
             }
 
@@ -798,18 +831,20 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
             match toml::to_string_pretty(config) {
                 Ok(text) => {
-                    state.note = Some("Configuration copied as TOML".to_string());
+                    state.note = Some(Note::new("Configuration copied as TOML".to_string()));
                     iced::clipboard::write(text)
                 }
                 Err(err) => {
-                    state.note = Some(err.to_string());
+                    state.note = Some(Note::new(err.to_string()));
                     Task::none()
                 }
             }
         }
 
-        Message::DismissNote => {
-            state.note = None;
+        Message::Ticked => {
+            if state.note.as_ref().is_some_and(|note| note.left() <= 0.0) {
+                state.note = None;
+            }
             Task::none()
         }
     }
@@ -838,14 +873,27 @@ fn view(state: &State) -> Element<'_, Message> {
         .padding(12);
 
     if state.config.is_some() && !state.writable {
-        screen = screen.push(banner(
-            "The daemon cannot save its config: changes apply now and are forgotten on restart",
-            None,
-        ));
+        screen = screen.push(
+            text("Changes apply now; the daemon cannot save them, so a restart forgets them")
+                .size(11),
+        );
     }
 
     if let Some(note) = &state.note {
-        screen = screen.push(banner(note, Some(Message::DismissNote)));
+        screen = screen.push(
+            container(
+                column![
+                    text(note.text.clone()).size(13),
+                    progress_bar(0.0..=1.0, note.left())
+                        .girth(2)
+                        .length(Length::Fill),
+                ]
+                .spacing(6),
+            )
+            .padding(10)
+            .width(Length::Fill)
+            .style(container::bordered_box),
+        );
     }
 
     screen.into()
@@ -1316,24 +1364,6 @@ fn action<'a>(
     } else {
         button.on_press(message)
     }
-}
-
-fn banner(message: &str, dismiss: Option<Message>) -> Element<'_, Message> {
-    let mut line = row![text(message.to_string()).size(13).width(Length::Fill)].spacing(8);
-
-    if let Some(dismiss) = dismiss {
-        line = line.push(
-            button(text("Dismiss"))
-                .style(button::secondary)
-                .on_press(dismiss),
-        );
-    }
-
-    container(line)
-        .padding(10)
-        .width(Length::Fill)
-        .style(container::bordered_box)
-        .into()
 }
 
 fn card(content: Element<'_, Message>) -> Element<'_, Message> {
