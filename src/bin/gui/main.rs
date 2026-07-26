@@ -336,8 +336,8 @@ impl State {
         (state, opening)
     }
 
-    /// True while a request is out. Anything that would send another is held
-    /// back rather than queued behind it.
+    /// True while a request is out, which is only worth knowing where there is
+    /// nothing yet to draw.
     fn busy(&self) -> bool {
         self.pending > 0
     }
@@ -922,7 +922,7 @@ fn speed_card(state: &State) -> Element<'_, Message> {
                     state.client.socket().display()
                 ))
                 .size(12),
-                action("Retry", button::primary, state.busy(), Message::Reload),
+                action("Retry", button::primary, Message::Reload),
             ]
             .spacing(8)
             .into(),
@@ -1002,8 +1002,8 @@ fn curve_list(state: &State) -> Element<'_, Message> {
 
     let mut list = column![row![
         text("Curves").size(15).width(Length::Fill),
-        action("Export", button::secondary, false, Message::ExportConfig),
-        action("Add", button::secondary, state.busy(), Message::CurveAdded),
+        action("Export", button::secondary, Message::ExportConfig),
+        action("Add", button::secondary, Message::CurveAdded),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center)]
@@ -1113,12 +1113,7 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
                 .width(Length::Fixed(200.0)),
                 pick_list(state.sensors.clone(), chosen, Message::CurveSensorPicked)
                     .width(Length::Fill),
-                action(
-                    "Remove",
-                    button::danger,
-                    state.busy(),
-                    Message::CurveRemoved
-                ),
+                action("Remove", button::danger, Message::CurveRemoved),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -1152,7 +1147,6 @@ fn tabs(state: &State) -> Element<'_, Message> {
             } else {
                 button::secondary
             },
-            state.busy() && which != state.tab,
             Message::TabSelected(which),
         )
     };
@@ -1195,12 +1189,7 @@ fn gears_pane(state: &State) -> Element<'_, Message> {
             column![
                 text("No gear table").size(15),
                 text("The cooler answers this one itself, so it has to be connected").size(12),
-                action(
-                    "Retry",
-                    button::primary,
-                    state.busy(),
-                    Message::TabSelected(Tab::Gears),
-                ),
+                action("Retry", button::primary, Message::TabSelected(Tab::Gears)),
             ]
             .spacing(8)
             .into(),
@@ -1229,18 +1218,11 @@ fn gears_pane(state: &State) -> Element<'_, Message> {
                     text(format!("{}{note}", gear.name)).width(Length::Fill),
                     text(format!("{} rpm", gear.rpm)),
                 ],
-                {
-                    let slider = slider(MIN_RPM..=ceiling, gear.rpm.min(ceiling), move |rpm| {
-                        Message::GearMoved { index, rpm }
-                    })
-                    .step(50u16);
-
-                    if state.busy() {
-                        slider
-                    } else {
-                        slider.on_release(Message::GearCommitted(index))
-                    }
-                },
+                slider(MIN_RPM..=ceiling, gear.rpm.min(ceiling), move |rpm| {
+                    Message::GearMoved { index, rpm }
+                })
+                .step(50u16)
+                .on_release(Message::GearCommitted(index)),
             ]
             .spacing(4),
         );
@@ -1264,7 +1246,6 @@ fn light_pane(state: &State) -> Element<'_, Message> {
             } else {
                 button::secondary
             },
-            state.busy(),
             Message::ModePicked(which),
         )
     };
@@ -1363,24 +1344,12 @@ fn light_pane(state: &State) -> Element<'_, Message> {
     )
 }
 
-/// A button that goes quiet while a request is out.
-///
-/// Every one of these sends a blocking round trip to the daemon, and lighting
-/// takes the cooler a good part of a second to accept. Letting them queue up
-/// behind each other is how the window ends up unresponsive.
 fn action<'a>(
     label: impl text::IntoFragment<'a>,
     style: fn(&Theme, button::Status) -> button::Style,
-    busy: bool,
     message: Message,
 ) -> iced::widget::Button<'a, Message> {
-    let button = button(text(label)).style(style);
-
-    if busy {
-        button
-    } else {
-        button.on_press(message)
-    }
+    button(text(label)).style(style).on_press(message)
 }
 
 fn card(content: Element<'_, Message>) -> Element<'_, Message> {
