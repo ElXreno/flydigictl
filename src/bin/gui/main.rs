@@ -184,23 +184,36 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
 
     let mut choices: Vec<SensorChoice> = Vec::new();
 
-    // A card is one entry and no more: it has a single temperature, and it is
-    // only readable while it is awake.
-    for card in sensors.iter().filter(|entry| entry.kind == Kind::Nvidia) {
-        choices.push(SensorChoice {
-            // Its power state is in the listing too, but a picker built once
-            // per connection would show yesterday's.
-            label: format!(
-                "nvidia {}",
-                flydigictl::sensor::short_address(&card.device)
-            ),
-            sensor: Sensor {
-                kind: Kind::Nvidia,
-                hwmon: String::new(),
-                device: card.device.clone(),
-                label: String::new(),
-            },
-        });
+    // A card has a core and its memory, and either can lead depending on the
+    // work, so it gets a hottest-of-both entry as well.
+    let mut cards: Vec<&str> = sensors
+        .iter()
+        .filter(|entry| entry.kind == Kind::Nvidia)
+        .map(|entry| entry.device.as_str())
+        .collect();
+    cards.dedup();
+
+    for card in cards {
+        let address = flydigictl::sensor::short_address(card);
+
+        // The power state is in the listing too, but a picker built once per
+        // connection would show yesterday's.
+        let mut push = |label: String, part: &str| {
+            choices.push(SensorChoice {
+                label,
+                sensor: Sensor {
+                    kind: Kind::Nvidia,
+                    hwmon: String::new(),
+                    device: card.to_string(),
+                    label: part.to_string(),
+                },
+            });
+        };
+
+        push(format!("nvidia {address} (hottest)"), "");
+        for part in ["core", "memory"] {
+            push(format!("nvidia {address}/{part}"), part);
+        }
     }
 
     for (hwmon, devices) in &chips {
@@ -1258,7 +1271,8 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
     let sensor = match (curve.sensor.kind, curve.sensor.label.is_empty()) {
         // A card curve carries no hwmon at all, so naming one would be naming
         // whatever the empty config happened to default to.
-        (Kind::Nvidia, _) => "nvidia, first card".to_string(),
+        (Kind::Nvidia, true) => "nvidia, first card".to_string(),
+        (Kind::Nvidia, false) => format!("nvidia, first card/{}", curve.sensor.label),
         (_, true) => format!("{}, hottest input", curve.sensor.hwmon),
         (_, false) => format!("{}/{}", curve.sensor.hwmon, curve.sensor.label),
     };
@@ -1273,7 +1287,8 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
             choice.sensor == curve.sensor
                 || (curve.sensor.kind == Kind::Nvidia
                     && curve.sensor.device.is_empty()
-                    && choice.sensor.kind == Kind::Nvidia)
+                    && choice.sensor.kind == Kind::Nvidia
+                    && choice.sensor.label == curve.sensor.label)
         })
         .cloned()
         .or_else(|| {

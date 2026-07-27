@@ -34,7 +34,19 @@ const DISPLAY: &str = "0x030";
 /// Memory temperature, in BAR0. Twelve bits, in thirty-seconds of a degree.
 ///
 /// The same offset across every Ada part, and publicly documented.
-const TEMPERATURE: usize = 0xE2A8;
+const MEMORY: usize = 0xE2A8;
+
+/// Core temperature, in whole degrees in the low byte.
+///
+/// Not published by anyone: NVIDIA's open headers carry no thermal register
+/// past a scratch word, and nouveau's readers stop at Pascal. Found by dumping
+/// the therm aperture at three known temperatures and keeping what tracked
+/// them, then confirmed against `nvidia-smi` over a cooling run: it follows the
+/// reported temperature one to two degrees ahead of it, the way a maximum over
+/// several sensors follows an average of them. Neighbours at 0x20460, 0x20474,
+/// 0x204B8 and 0x204C4 hold the same thing to a fraction of a degree, in
+/// 24.8 fixed point with bit 30 set; this one is the plain reading.
+const CORE: usize = 0x20400;
 
 /// A suspended card returns all ones for every read, which decodes to 127.97
 /// degrees. No card reports that on purpose, so it is a reliable "asleep".
@@ -67,17 +79,22 @@ fn awake(card: &str) -> Option<bool> {
     Some(status == "active")
 }
 
-/// One page of a card's registers, held open for as long as the sensor is.
+/// The pages of a card's registers holding what this reads, kept open for as
+/// long as the sensor is.
 ///
 /// Mapping is the expensive half and it survives the card suspending and
-/// resuming, so it is done once. The map is read-only and one page long: the
-/// only register wanted is in it, and there is no reason to have the rest of
-/// a 16 MB aperture within reach of a stray offset.
+/// resuming, so it is done once. Every map is read-only and a single page: the
+/// two registers wanted are in two of them, and there is no reason to have the
+/// rest of a 16 MB aperture within reach of a stray offset.
 struct Registers {
+    pages: Vec<Page>,
+}
+
+struct Page {
     base: *const u8,
     len: NonZeroUsize,
-    /// Offset of [`TEMPERATURE`] within the mapped page.
-    at: usize,
+    /// Where in the aperture this page starts.
+    from: usize,
 }
 
 // The pointer is only ever read from, through a raw read at a fixed offset
@@ -86,21 +103,58 @@ unsafe impl Send for Registers {}
 
 impl Registers {
     fn open(card: &str) -> Option<Self> {
-        use nix::sys::mman::{mmap, MapFlags, ProtFlags};
-
-        let page = nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE)
+        let size = nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE)
             .ok()
             .flatten()
             .and_then(|size| usize::try_from(size).ok())
             .filter(|size| size.is_power_of_two())?;
 
-        let aligned = TEMPERATURE & !(page - 1);
-        let len = NonZeroUsize::new(page)?;
-
         let file = File::open(Path::new(PCI).join(card).join("resource0")).ok()?;
 
-        // Safety: a read-only private view of a device's own aperture. Nothing
-        // else in this process maps it, and the length is one page.
+        let mut starts = vec![MEMORY & !(size - 1), CORE & !(size - 1)];
+        starts.dedup();
+
+        let pages = starts
+            .into_iter()
+            .map(|from| Page::map(&file, from, size))
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(Self { pages })
+    }
+
+    fn word(&self, at: usize) -> Option<u32> {
+        let page = self
+            .pages
+            .iter()
+            .find(|page| at >= page.from && at - page.from < page.len.get())?;
+
+        // Safety: the offset was just checked to sit inside this mapping, and
+        // a register read has to be volatile or the compiler is free to hoist
+        // it out of the loop that takes it.
+        Some(unsafe {
+            page.base
+                .add(at - page.from)
+                .cast::<u32>()
+                .read_volatile()
+        })
+    }
+
+    fn memory(&self) -> Option<u8> {
+        decode_memory(self.word(MEMORY)?)
+    }
+
+    fn core(&self) -> Option<u8> {
+        decode_core(self.word(CORE)?)
+    }
+}
+
+impl Page {
+    fn map(file: &File, from: usize, size: usize) -> Option<Self> {
+        use nix::sys::mman::{mmap, MapFlags, ProtFlags};
+
+        let len = NonZeroUsize::new(size)?;
+
+        // Safety: a read-only view of a device's own aperture, one page long.
         let mapping = unsafe {
             mmap(
                 None,
@@ -108,7 +162,7 @@ impl Registers {
                 ProtFlags::PROT_READ,
                 MapFlags::MAP_SHARED,
                 file.as_fd(),
-                aligned as i64,
+                from as i64,
             )
         }
         .ok()?;
@@ -116,21 +170,14 @@ impl Registers {
         Some(Self {
             base: mapping.as_ptr().cast::<u8>().cast_const(),
             len,
-            at: TEMPERATURE - aligned,
+            from,
         })
-    }
-
-    fn temperature(&self) -> Option<u8> {
-        // Safety: `at` was computed to sit inside the mapping, and a register
-        // read has to be volatile or the compiler is free to hoist it out.
-        let raw = unsafe { self.base.add(self.at).cast::<u32>().read_volatile() };
-        decode(raw)
     }
 }
 
-impl Drop for Registers {
+impl Drop for Page {
     fn drop(&mut self) {
-        // Safety: this is the mapping made in `open`, unmapped once.
+        // Safety: this is the mapping made in `map`, unmapped once.
         let _ = unsafe {
             nix::sys::mman::munmap(
                 std::ptr::NonNull::new(self.base.cast_mut().cast()).unwrap(),
@@ -142,26 +189,71 @@ impl Drop for Registers {
 
 /// Twelve bits of thirty-seconds of a degree, and nothing believable outside
 /// what silicon survives.
-fn decode(raw: u32) -> Option<u8> {
+fn decode_memory(raw: u32) -> Option<u8> {
     if raw == NO_ANSWER {
         return None;
     }
 
-    let degrees = (raw & 0xFFF) / 32;
+    believable((raw & 0xFFF) / 32)
+}
+
+/// Whole degrees in the low byte.
+fn decode_core(raw: u32) -> Option<u8> {
+    if raw == NO_ANSWER {
+        return None;
+    }
+
+    believable(raw & 0xFF)
+}
+
+fn believable(degrees: u32) -> Option<u8> {
     (degrees > 0 && degrees < 127).then_some(degrees as u8)
+}
+
+/// Which of a card's two temperatures to follow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Part {
+    /// Whichever is hotter, which is what a curve wants unless it was told
+    /// otherwise: the two lead each other depending on the work.
+    #[default]
+    Hottest,
+    Core,
+    Memory,
+}
+
+impl Part {
+    /// The name a config or a picker uses. Anything else is [`Self::Hottest`],
+    /// so an empty label keeps meaning "all of it".
+    pub fn named(label: &str) -> Self {
+        match label {
+            "core" => Self::Core,
+            "memory" => Self::Memory,
+            _ => Self::Hottest,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hottest => "",
+            Self::Core => "core",
+            Self::Memory => "memory",
+        }
+    }
 }
 
 /// A card's temperature, for whoever wants it repeatedly.
 pub struct Sensor {
     card: String,
+    part: Part,
     registers: Option<Registers>,
     complained: bool,
 }
 
 impl Sensor {
-    pub fn open(card: &str) -> Self {
+    pub fn open(card: &str, part: Part) -> Self {
         Self {
             card: card.to_string(),
+            part,
             registers: Registers::open(card),
             complained: false,
         }
@@ -208,7 +300,11 @@ impl Sensor {
             return None;
         }
 
-        registers.temperature()
+        match self.part {
+            Part::Core => registers.core(),
+            Part::Memory => registers.memory(),
+            Part::Hottest => registers.core().max(registers.memory()),
+        }
     }
 }
 
@@ -227,8 +323,8 @@ pub fn power_state(card: &str) -> Option<String> {
 }
 
 /// One reading, for a listing that has no sensor to hand.
-pub fn read_temperature(card: &str) -> Option<u8> {
-    Sensor::open(card).read()
+pub fn read_temperature(card: &str, part: Part) -> Option<u8> {
+    Sensor::open(card, part).read()
 }
 
 #[cfg(test)]
@@ -237,17 +333,36 @@ mod tests {
 
     #[test]
     fn decodes_thirty_seconds_of_a_degree() {
-        assert_eq!(decode(64 * 32), Some(64));
-        assert_eq!(decode(47 * 32 + 16), Some(47));
+        assert_eq!(decode_memory(64 * 32), Some(64));
+        assert_eq!(decode_memory(47 * 32 + 16), Some(47));
 
-        // Only the low twelve bits are the temperature.
-        assert_eq!(decode(0xABCD_0000 | (50 * 32)), Some(50));
+        // Only the low twelve bits are the temperature; the top one is a flag.
+        assert_eq!(decode_memory(0x8000_0000 | (50 * 32)), Some(50));
+    }
+
+    #[test]
+    fn decodes_the_core_as_whole_degrees() {
+        // The readings this was found with, taken alongside 42, 47 and 60 from
+        // the vendor tool.
+        assert_eq!(decode_core(0x0000_002C), Some(44));
+        assert_eq!(decode_core(0x0000_0030), Some(48));
+        assert_eq!(decode_core(0x0000_003E), Some(62));
     }
 
     #[test]
     fn refuses_what_a_sleeping_card_answers() {
-        assert_eq!(decode(NO_ANSWER), None);
-        assert_eq!(decode(0xFFF), None);
-        assert_eq!(decode(0), None);
+        assert_eq!(decode_memory(NO_ANSWER), None);
+        assert_eq!(decode_core(NO_ANSWER), None);
+        assert_eq!(decode_memory(0xFFF), None);
+        assert_eq!(decode_memory(0), None);
+        assert_eq!(decode_core(0), None);
+    }
+
+    #[test]
+    fn names_the_parts_a_config_can_ask_for() {
+        assert_eq!(Part::named("core"), Part::Core);
+        assert_eq!(Part::named("memory"), Part::Memory);
+        assert_eq!(Part::named(""), Part::Hottest);
+        assert_eq!(Part::named("anything else"), Part::Hottest);
     }
 }

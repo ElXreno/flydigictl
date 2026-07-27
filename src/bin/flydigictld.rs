@@ -125,7 +125,10 @@ impl Source {
                     sensor.device.clone()
                 };
 
-                Self::Nvidia(Box::new(nvidia::Sensor::open(&card)))
+                Self::Nvidia(Box::new(nvidia::Sensor::open(
+                    &card,
+                    nvidia::Part::named(&sensor.label),
+                )))
             }
         }
     }
@@ -635,16 +638,22 @@ fn control_loop(
                             })
                             .collect();
 
-                        // Asking a sleeping card for its temperature would wake
-                        // it, so the listing carries its power state instead
-                        // and leaves the reading empty.
-                        sensors.extend(nvidia::cards().into_iter().map(|card| ipc::SensorInfo {
-                            kind: Kind::Nvidia,
-                            hwmon: "nvidia".to_string(),
-                            kernel: nvidia::power_state(&card).unwrap_or_default(),
-                            temp_c: nvidia::read_temperature(&card),
-                            device: card,
-                            label: String::new(),
+                        // A card has two readings and a power state, and a
+                        // sleeping one has neither reading; the state is
+                        // carried so a client can say so rather than guess.
+                        sensors.extend(nvidia::cards().into_iter().flat_map(|card| {
+                            let state = nvidia::power_state(&card).unwrap_or_default();
+
+                            [nvidia::Part::Core, nvidia::Part::Memory].map(move |part| {
+                                ipc::SensorInfo {
+                                    kind: Kind::Nvidia,
+                                    hwmon: "nvidia".to_string(),
+                                    kernel: state.clone(),
+                                    temp_c: nvidia::read_temperature(&card, part),
+                                    device: card.clone(),
+                                    label: part.label().to_string(),
+                                }
+                            })
                         }));
 
                         Reply::Sensors { sensors }
