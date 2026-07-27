@@ -1195,8 +1195,14 @@ fn curve_list(state: &State) -> Element<'_, Message> {
             .as_ref()
             .and_then(|status| status.demands.iter().find(|demand| demand.name == name));
 
+        let asleep = state
+            .status
+            .as_ref()
+            .is_some_and(|status| status.asleep.contains(&name));
+
         let detail = match demand {
             Some(demand) => format!("{} C  ->  {} rpm", demand.temp_c, demand.rpm),
+            None if asleep => "asleep".to_string(),
             None => "no reading".to_string(),
         };
 

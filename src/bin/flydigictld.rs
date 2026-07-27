@@ -128,6 +128,14 @@ impl Source {
         }
     }
 
+    /// Is the thing this watches asleep? Only a card can be.
+    fn sleeping(&self) -> bool {
+        match self {
+            Self::Hwmon(_) => false,
+            Self::Nvidia(card) => nvidia::power_state(card).is_some_and(|state| state != "active"),
+        }
+    }
+
     /// The reading to follow, or nothing when there is none to be had - which
     /// for a sleeping GPU is the honest answer rather than a failure.
     fn read(&self) -> Option<u8> {
@@ -142,6 +150,10 @@ struct Curves {
     runners: Vec<Runner>,
     smoothing: Smoothing,
     complained: bool,
+
+    /// Curves that read nothing because the thing they watch is asleep, which
+    /// is not the same as a sensor that is missing or broken.
+    asleep: Vec<String>,
 }
 
 impl Curves {
@@ -164,6 +176,7 @@ impl Curves {
             runners,
             smoothing: config.smoothing,
             complained: false,
+            asleep: Vec::new(),
         };
         curves.complain_about_missing();
         curves
@@ -204,6 +217,7 @@ impl Curves {
     /// fatal - the rest keep the cooler running.
     fn evaluate(&mut self, dt_secs: f32) -> Vec<Demand> {
         let mut demands = Vec::new();
+        self.asleep.clear();
 
         for runner in &mut self.runners {
             if runner.source.missing() {
@@ -214,6 +228,9 @@ impl Curves {
             }
 
             let Some(raw) = runner.source.read() else {
+                if runner.source.sleeping() {
+                    self.asleep.push(runner.name.clone());
+                }
                 continue;
             };
 
@@ -893,6 +910,7 @@ fn control_loop(
                                 lighting,
                                 strip_on,
                                 leading: leader.as_ref().map(|d| d.name.clone()),
+                                asleep: curves.asleep.clone(),
                                 demands: demands.clone(),
                             }));
                         }

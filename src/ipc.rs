@@ -144,6 +144,7 @@ impl Status {
             lighting: None,
             strip_on: None,
             leading: None,
+            asleep: Vec::new(),
             demands: Vec::new(),
         }
     }
@@ -185,6 +186,11 @@ pub struct Status {
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,
+
+    /// Curves that read nothing because what they watch is asleep. A sleeping
+    /// GPU has no temperature to give and must not be woken for one, which is
+    /// a different thing from a sensor that is missing.
+    pub asleep: Vec<String>,
 
     /// Every curve's reading and demand, for graphs and debugging.
     pub demands: Vec<Demand>,
