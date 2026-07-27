@@ -109,25 +109,34 @@ struct Runner {
 enum Source {
     /// Every input the curve matches; the hottest of them is what it follows.
     Hwmon(Vec<PathBuf>),
-    Nvidia(String),
+    /// A card, holding its mapped registers open: mapping is what costs, and
+    /// the mapping outlives the card suspending and resuming.
+    Nvidia(Box<nvidia::Sensor>),
 }
 
 impl Source {
     fn find(sensor: &Sensor) -> Self {
         match sensor.kind {
             Kind::Hwmon => Self::Hwmon(sensor::resolve_all(sensor)),
-            Kind::Nvidia => Self::Nvidia(if sensor.device.is_empty() {
-                nvidia::cards().first().cloned().unwrap_or_default()
-            } else {
-                sensor.device.clone()
-            }),
+            Kind::Nvidia => {
+                let card = if sensor.device.is_empty() {
+                    nvidia::cards().first().cloned().unwrap_or_default()
+                } else {
+                    sensor.device.clone()
+                };
+
+                Self::Nvidia(Box::new(nvidia::Sensor::open(
+                    &card,
+                    nvidia::Part::named(&sensor.label),
+                )))
+            }
         }
     }
 
     fn missing(&self) -> bool {
         match self {
             Self::Hwmon(paths) => paths.is_empty(),
-            Self::Nvidia(card) => card.is_empty(),
+            Self::Nvidia(card) => card.card().is_empty() || card.missing(),
         }
     }
 
@@ -135,16 +144,16 @@ impl Source {
     fn sleeping(&self) -> bool {
         match self {
             Self::Hwmon(_) => false,
-            Self::Nvidia(card) => nvidia::power_state(card).is_some_and(|state| state != "active"),
+            Self::Nvidia(card) => card.sleeping(),
         }
     }
 
     /// The reading to follow, or nothing when there is none to be had - which
     /// for a sleeping GPU is the honest answer rather than a failure.
-    fn read(&self) -> Option<u8> {
+    fn read(&mut self) -> Option<u8> {
         match self {
             Self::Hwmon(paths) => paths.iter().filter_map(|path| sensor::read(path)).max(),
-            Self::Nvidia(card) => nvidia::read_temperature(card),
+            Self::Nvidia(card) => card.read(),
         }
     }
 }
@@ -629,16 +638,22 @@ fn control_loop(
                             })
                             .collect();
 
-                        // Asking a sleeping card for its temperature would wake
-                        // it, so the listing carries its power state instead
-                        // and leaves the reading empty.
-                        sensors.extend(nvidia::cards().into_iter().map(|card| ipc::SensorInfo {
-                            kind: Kind::Nvidia,
-                            hwmon: "nvidia".to_string(),
-                            kernel: nvidia::power_state(&card).unwrap_or_default(),
-                            temp_c: nvidia::read_temperature(&card),
-                            device: card,
-                            label: String::new(),
+                        // A card has two readings and a power state, and a
+                        // sleeping one has neither reading; the state is
+                        // carried so a client can say so rather than guess.
+                        sensors.extend(nvidia::cards().into_iter().flat_map(|card| {
+                            let state = nvidia::power_state(&card).unwrap_or_default();
+
+                            [nvidia::Part::Core, nvidia::Part::Memory].map(move |part| {
+                                ipc::SensorInfo {
+                                    kind: Kind::Nvidia,
+                                    hwmon: "nvidia".to_string(),
+                                    kernel: state.clone(),
+                                    temp_c: nvidia::read_temperature(&card, part),
+                                    device: card.clone(),
+                                    label: part.label().to_string(),
+                                }
+                            })
                         }));
 
                         Reply::Sensors { sensors }

@@ -237,14 +237,17 @@ fn run() -> Result<()> {
         }
         for card in flydigictl::nvidia::cards() {
             let state = flydigictl::nvidia::power_state(&card).unwrap_or_default();
-            println!(
-                "{:<24} {:<20} {:<12} {}",
-                "nvidia",
-                card,
-                state,
-                flydigictl::nvidia::read_temperature(&card)
-                    .map_or("-".to_string(), |t| format!("{t} C")),
-            );
+
+            for part in [flydigictl::nvidia::Part::Core, flydigictl::nvidia::Part::Memory] {
+                println!(
+                    "{:<24} {:<20} {:<12} {}",
+                    "nvidia",
+                    format!("{card} ({})", part.label()),
+                    state,
+                    flydigictl::nvidia::read_temperature(&card, part)
+                        .map_or("-".to_string(), |t| format!("{t} C")),
+                );
+            }
         }
 
         for entry in available {

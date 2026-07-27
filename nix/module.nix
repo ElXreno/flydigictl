@@ -49,18 +49,18 @@ in
       enable = lib.mkEnableOption ''
         reading an NVIDIA GPU's temperature.
 
-        The driver publishes no hwmon, so the daemon asks `nvidia-smi` - and
-        only while the card is awake, which it checks in sysfs first. Waking a
-        card out of D3cold to take its temperature would cost more power than
-        the fan it is meant to inform
-      '';
+        The reading is taken off the card's own registers, mapped read-only
+        through sysfs, because the vendor tool cannot be used for this: opening
+        the driver's device nodes takes a runtime power reference, so a card
+        polled every few seconds never suspends again. Mapping a BAR bypasses
+        the driver entirely, and a suspended card answers with all ones instead
+        of waking up.
 
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = config.hardware.nvidia.package.bin;
-        defaultText = lib.literalExpression "config.hardware.nvidia.package.bin";
-        description = "Package providing {command}`nvidia-smi`.";
-      };
+        This grants group `flydigi` read access to the register aperture of
+        every NVIDIA display controller, and needs `iomem=relaxed` on the kernel
+        command line, since the driver claims the aperture and the mapping is
+        refused otherwise
+      '';
     };
 
     settings = lib.mkOption {
@@ -126,8 +126,20 @@ in
 
       users.groups.flydigi = { };
 
+      warnings = lib.optional (daemon.nvidia.enable && !(lib.elem "iomem=relaxed" config.boot.kernelParams)) ''
+        services.flydigictl.nvidia is on, but the kernel command line has no
+        iomem=relaxed. The driver claims the card's registers, so mapping them
+        is refused and the GPU curve will never read anything.
+      '';
+
       services.udev.extraRules = ''
         SUBSYSTEM=="hidraw", KERNELS=="*:37D7:*", GROUP="flydigi", MODE="0660"
+      ''
+      # resource0 is a sysfs attribute, created root-owned and 0600 by the
+      # kernel with no way to ask for anything else, so its mode is changed
+      # after the fact rather than declared.
+      + lib.optionalString daemon.nvidia.enable ''
+        SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", RUN+="${pkgs.coreutils}/bin/chgrp flydigi /sys$devpath/resource0", RUN+="${pkgs.coreutils}/bin/chmod 0640 /sys$devpath/resource0"
       '';
 
       systemd.sockets.flydigictld = {
@@ -143,7 +155,6 @@ in
 
       systemd.services.flydigictld = {
         description = "Flydigi cooler fan curve daemon";
-        path = lib.optional daemon.nvidia.enable daemon.nvidia.package;
         wantedBy = [ "multi-user.target" ];
 
         # systemd creates the socket in a directory the dynamic user cannot
@@ -163,10 +174,7 @@ in
           SupplementaryGroups = [ "flydigi" ];
 
           DevicePolicy = "closed";
-          DeviceAllow = [
-            "char-hidraw rw"
-          ]
-          ++ lib.optional daemon.nvidia.enable "char-nvidia rw";
+          DeviceAllow = [ "char-hidraw rw" ];
           ProtectSystem = "strict";
           ProtectHome = true;
           ProtectKernelTunables = true;
