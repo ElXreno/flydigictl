@@ -754,12 +754,22 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.manual_intent = None;
             }
 
+            // A rebuild replaces the config file and the daemon rereads it
+            // without a word, so the copy on screen has to be checked against
+            // the daemon's rather than assumed to still be current.
+            let stale = state
+                .status
+                .as_ref()
+                .is_some_and(|previous| previous.revision != status.revision);
+
             state.status = Some(*status);
 
             // A daemon that just came back may be running a different config,
             // and its sensors are its own to report.
             if first {
                 Task::batch([state.reload(), state.load_sensors()])
+            } else if stale {
+                state.reload()
             } else {
                 Task::none()
             }
