@@ -145,6 +145,7 @@ impl Status {
             strip_on: None,
             leading: None,
             asleep: Vec::new(),
+            unreadable: Vec::new(),
             demands: Vec::new(),
         }
     }
@@ -191,6 +192,10 @@ pub struct Status {
     /// GPU has no temperature to give and must not be woken for one, which is
     /// a different thing from a sensor that is missing.
     pub asleep: Vec<String>,
+
+    /// Curves whose sensor is there and awake and still gives nothing, which
+    /// is a permission or a driver problem rather than a state to wait out.
+    pub unreadable: Vec<String>,
 
     /// Every curve's reading and demand, for graphs and debugging.
     pub demands: Vec<Demand>,
