@@ -3,9 +3,23 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Curve, Point, Smoothing};
+use crate::protocol::{MIN_RPM, STOP_RPM};
 
 /// Speed a curve asks for at a temperature, interpolated between its points.
+///
+/// A curve may ask for [`STOP_RPM`], which stops the fan; everything between
+/// that and [`MIN_RPM`] is the stall band, where the blades barely turn and the
+/// tachometer flips between 0 and 400, so anything landing in it is rounded up
+/// to the slowest speed the cooler actually holds.
 pub fn target_for(points: &[Point], temp_c: u8) -> Option<u16> {
+    holdable(raw_target_for(points, temp_c)?)
+}
+
+fn holdable(rpm: u16) -> Option<u16> {
+    Some(if rpm == STOP_RPM { rpm } else { rpm.max(MIN_RPM) })
+}
+
+fn raw_target_for(points: &[Point], temp_c: u8) -> Option<u16> {
     let first = points.first()?;
     let last = points.last()?;
 
@@ -157,6 +171,26 @@ mod tests {
         assert_eq!(target_for(&points, 50), Some(500));
         assert_eq!(target_for(&points, 70), Some(2000));
         assert_eq!(target_for(&points, 95), Some(3000));
+    }
+
+    #[test]
+    fn never_asks_for_a_speed_the_fan_cannot_hold() {
+        let points = points();
+
+        // 45 interpolates to 250, which is the stall band.
+        assert_eq!(target_for(&points, 45), Some(MIN_RPM));
+
+        // A point put there by hand is rounded up the same way, while a stop
+        // stays a stop.
+        let hand_written = vec![
+            Point {
+                temp_c: 40,
+                rpm: 300,
+            },
+            Point { temp_c: 50, rpm: 0 },
+        ];
+        assert_eq!(target_for(&hand_written, 30), Some(MIN_RPM));
+        assert_eq!(target_for(&hand_written, 60), Some(STOP_RPM));
     }
 
     #[test]
