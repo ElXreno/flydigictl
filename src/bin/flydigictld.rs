@@ -36,6 +36,9 @@ const SILENCE: Duration = Duration::from_secs(3);
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How long every curve has to agree the fan can stop before it is stopped.
+const STOP_AFTER: Duration = Duration::from_secs(60);
+
 /// Lighting reports sent back to back are dropped by the cooler.
 const LIGHT_GAP: Duration = Duration::from_millis(5);
 
@@ -515,6 +518,9 @@ fn control_loop(
     // reconnect can restore it: realtime mode does not survive one.
     let mut applied: Option<u16> = None;
 
+    // Since when every curve has been asking for a stopped fan.
+    let mut idle_since: Option<Instant> = None;
+
     let mut supply: Option<protocol::Supply> = None;
     let mut strip_on: Option<bool> = None;
 
@@ -856,6 +862,29 @@ fn control_loop(
                                 Some(supply.max_rpm())
                             }
                             (rpm, _) => rpm,
+                        };
+
+                        // Stopping is not symmetric with starting. Speeding up
+                        // happens the moment a curve asks for it, but a stopped
+                        // fan needs some 20 s of stall-and-retry before it turns
+                        // again, so it stops only once the curves have held it
+                        // there for a while - otherwise a reading wobbling
+                        // across the first point switches the cooler on and off
+                        // all evening. Asking for a stop by hand is honoured at
+                        // once: that is a person, not a wobbling reading.
+                        let wanted = match wanted {
+                            Some(STOP_RPM) if manual_rpm.is_none() => {
+                                let since = *idle_since.get_or_insert_with(Instant::now);
+                                if applied == Some(STOP_RPM) || since.elapsed() >= STOP_AFTER {
+                                    Some(STOP_RPM)
+                                } else {
+                                    Some(MIN_RPM)
+                                }
+                            }
+                            other => {
+                                idle_since = None;
+                                other
+                            }
                         };
 
                         if let Some(wanted) = wanted {
