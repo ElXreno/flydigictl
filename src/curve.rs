@@ -112,8 +112,14 @@ pub struct Demand {
 /// Temperatures from different subsystems cannot be averaged - 60 °C is idle
 /// for a CPU and hot for RAM - so each curve converts its own reading into a
 /// speed first, and only speeds are compared.
+///
+/// A fan nobody is asking for has no leader: when every curve is content the
+/// answer is nothing, not whichever of them happened to sort last.
 pub fn winner(demands: &[Demand]) -> Option<&Demand> {
-    demands.iter().max_by_key(|demand| demand.rpm)
+    demands
+        .iter()
+        .max_by_key(|demand| demand.rpm)
+        .filter(|demand| demand.rpm != STOP_RPM)
 }
 
 /// Name a curve for logs and status when the config left it blank.
