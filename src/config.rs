@@ -75,9 +75,24 @@ pub struct Curve {
     pub panic_c: Option<u8>,
 }
 
+/// Where a reading comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A sysfs hwmon input, which is everything the kernel exposes.
+    #[default]
+    Hwmon,
+
+    /// An NVIDIA GPU, which the kernel does not expose and which must not be
+    /// woken to be asked.
+    Nvidia,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sensor {
+    pub kind: Kind,
+
     /// hwmon driver name, e.g. "k10temp", "nvme" or "spd5118".
     pub hwmon: String,
 
@@ -125,6 +140,7 @@ pub struct Point {
 impl Default for Sensor {
     fn default() -> Self {
         Self {
+            kind: Kind::Hwmon,
             hwmon: "k10temp".to_string(),
             device: String::new(),
             label: String::new(),

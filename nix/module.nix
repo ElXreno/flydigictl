@@ -45,6 +45,24 @@ in
       '';
     };
 
+    nvidia = {
+      enable = lib.mkEnableOption ''
+        reading an NVIDIA GPU's temperature.
+
+        The driver publishes no hwmon, so the daemon asks `nvidia-smi` - and
+        only while the card is awake, which it checks in sysfs first. Waking a
+        card out of D3cold to take its temperature would cost more power than
+        the fan it is meant to inform
+      '';
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = config.hardware.nvidia.package.bin;
+        defaultText = lib.literalExpression "config.hardware.nvidia.package.bin";
+        description = "Package providing {command}`nvidia-smi`.";
+      };
+    };
+
     settings = lib.mkOption {
       type = format.type;
       default = { };
@@ -125,6 +143,7 @@ in
 
       systemd.services.flydigictld = {
         description = "Flydigi cooler fan curve daemon";
+        path = lib.optional daemon.nvidia.enable daemon.nvidia.package;
         wantedBy = [ "multi-user.target" ];
 
         # systemd creates the socket in a directory the dynamic user cannot
@@ -144,7 +163,10 @@ in
           SupplementaryGroups = [ "flydigi" ];
 
           DevicePolicy = "closed";
-          DeviceAllow = [ "char-hidraw rw" ];
+          DeviceAllow = [
+            "char-hidraw rw"
+          ]
+          ++ lib.optional daemon.nvidia.enable "char-nvidia rw";
           ProtectSystem = "strict";
           ProtectHome = true;
           ProtectKernelTunables = true;

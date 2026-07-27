@@ -78,6 +78,9 @@ pub enum Reply {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SensorInfo {
+    /// `hwmon` for anything the kernel exposes, `nvidia` for a card that has to
+    /// be asked with the vendor tool and only while it is awake.
+    pub kind: crate::config::Kind,
     pub hwmon: String,
     /// Stable address of the chip, which is what tells two of a kind apart.
     pub device: String,
@@ -141,6 +144,7 @@ impl Status {
             lighting: None,
             strip_on: None,
             leading: None,
+            asleep: Vec::new(),
             demands: Vec::new(),
         }
     }
@@ -182,6 +186,11 @@ pub struct Status {
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,
+
+    /// Curves that read nothing because what they watch is asleep. A sleeping
+    /// GPU has no temperature to give and must not be woken for one, which is
+    /// a different thing from a sensor that is missing.
+    pub asleep: Vec<String>,
 
     /// Every curve's reading and demand, for graphs and debugging.
     pub demands: Vec<Demand>,
