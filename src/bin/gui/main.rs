@@ -365,6 +365,17 @@ struct State {
     /// When the queue last went from empty to busy, for the turning arc.
     working_since: Option<std::time::Instant>,
 
+    /// The daemon's configuration has moved and this copy has not caught up.
+    ///
+    /// Refetching is held until the queue drains. An edit sent from here moves
+    /// the revision too, so refetching on the spot would race the edits still
+    /// in flight and overwrite a point mid-drag with the state before it.
+    stale: bool,
+
+    /// Revision bumps this interface caused itself and has yet to see come
+    /// back, so they are not mistaken for a change made elsewhere.
+    mine: u64,
+
     /// The config as the daemon last had it, and the way back and forward.
     ///
     /// Snapshots are taken when a change is sent rather than as it is made:
@@ -404,6 +415,8 @@ impl State {
             lighting_out: false,
             lighting_again: false,
             working_since: None,
+            stale: false,
+            mine: 0,
             committed: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -474,6 +487,13 @@ impl State {
     /// Send a config without touching the history, which undo needs.
     fn send(&mut self, config: Config) -> Task<Message> {
         let client = self.client.clone();
+
+        // Sending moves the daemon's revision, and that is not news: this is
+        // where it came from. Counted so the status carrying it back does not
+        // read as somebody else's change and pull the config out from under a
+        // drag that has already started.
+        self.mine += 1;
+
         self.ask(move || client.set_config(config), Answer::Acked)
     }
 
@@ -757,18 +777,31 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             // A rebuild replaces the config file and the daemon rereads it
             // without a word, so the copy on screen has to be checked against
             // the daemon's rather than assumed to still be current.
-            let stale = state
+            if let Some(moved) = state
                 .status
                 .as_ref()
-                .is_some_and(|previous| previous.revision != status.revision);
+                .map(|previous| status.revision.saturating_sub(previous.revision))
+                .filter(|moved| *moved > 0)
+            {
+                // Ours come back first and account for themselves; anything
+                // beyond that came from a rebuild or another client.
+                if moved > state.mine {
+                    state.stale = true;
+                    state.mine = 0;
+                } else {
+                    state.mine -= moved;
+                }
+            }
 
             state.status = Some(*status);
 
             // A daemon that just came back may be running a different config,
             // and its sensors are its own to report.
             if first {
+                state.stale = false;
                 Task::batch([state.reload(), state.load_sensors()])
-            } else if stale {
+            } else if state.stale && !state.busy() {
+                state.stale = false;
                 state.reload()
             } else {
                 Task::none()
