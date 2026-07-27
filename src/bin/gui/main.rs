@@ -110,6 +110,7 @@ enum Message {
     BrightnessChanged(u8),
     BrightnessCommitted,
     IndicatorsToggled(bool),
+    FollowScreensToggled(bool),
 
     StandbySelected(Standby),
     ExportConfig,
@@ -950,6 +951,15 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.apply_light()
         }
 
+        Message::FollowScreensToggled(on) => {
+            let Some(config) = state.config.as_mut() else {
+                return Task::none();
+            };
+
+            config.lights_follow_screens = on;
+            state.push()
+        }
+
         Message::StandbySelected(standby) => {
             if let Some(config) = state.config.as_mut() {
                 config.standby = Some(standby);
@@ -1491,6 +1501,16 @@ fn light_pane(state: &State) -> Element<'_, Message> {
             checkbox(state.light.indicators)
                 .label("Gear indicator LEDs")
                 .on_toggle(Message::IndicatorsToggled),
+            checkbox(
+                state
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.lights_follow_screens)
+            )
+            .label("Go dark with the screens")
+            .on_toggle(Message::FollowScreensToggled),
+            text("Both lights go out while every display is off, and come back with the first one that lights up")
+                .size(11),
         ]
         .spacing(10)
         .into(),

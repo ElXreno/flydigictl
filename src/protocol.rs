@@ -535,6 +535,14 @@ pub fn light_off() -> [u8; REPORT_LEN] {
     build_report(CMD_LIGHT_POWER, &[0x00])
 }
 
+/// Light the strip again with whatever it was last given.
+///
+/// The animation lives in the cooler's own flash, so power is all this takes:
+/// nothing has to be uploaded to get the same pattern back.
+pub fn light_on() -> [u8; REPORT_LEN] {
+    build_report(CMD_LIGHT_POWER, &[0x01])
+}
+
 /// Number of built-in effects the firmware carries.
 pub const EFFECT_COUNT: u8 = 5;
 
