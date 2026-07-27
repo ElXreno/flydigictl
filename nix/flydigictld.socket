@@ -1,0 +1,11 @@
+[Unit]
+Description=Flydigi cooler daemon control socket
+
+[Socket]
+ListenStream=/run/flydigictl/flydigictl.sock
+SocketMode=0660
+SocketGroup=users
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

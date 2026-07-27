@@ -22,6 +22,18 @@ nfpms:
     contents:
       - src: nix/70-flydigi-cooler.rules
         dst: /usr/lib/udev/rules.d/70-flydigi-cooler.rules
+      # Without these the packages ship a daemon with nothing to start it.
+      - src: nix/flydigictld.service
+        dst: /usr/lib/systemd/system/flydigictld.service
+      - src: nix/flydigictld.socket
+        dst: /usr/lib/systemd/system/flydigictld.socket
+      - src: docs/PROTOCOL.md
+        dst: /usr/share/doc/flydigictl/PROTOCOL.md
+      - src: docs/FIRMWARE.md
+        dst: /usr/share/doc/flydigictl/FIRMWARE.md
+    scripts:
+      preinstall: nix/package-scripts/preinstall.sh
+      postinstall: nix/package-scripts/postinstall.sh
 
 changelog:
   disable: true

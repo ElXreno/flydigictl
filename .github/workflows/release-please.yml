@@ -18,7 +18,11 @@ jobs:
       - id: release
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # The workflow's own token, which the permissions above already grant
+          # what this needs. A personal one would only buy CI running on the
+          # release pull request, since a token issued to a workflow cannot
+          # trigger another one.
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
@@ -55,10 +59,17 @@ jobs:
     needs: goreleaser
     if: always() && needs.goreleaser.result != 'failure'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # The workflow's own token, which the permissions above already grant
+          # what this needs. A personal one would only buy CI running on the
+          # release pull request, since a token issued to a workflow cannot
+          # trigger another one.
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true

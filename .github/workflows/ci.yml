@@ -19,11 +19,14 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      # Every target and every feature: the interface sits behind `gui` and was
+      # not being linted at all, and without `--all-targets` neither were the
+      # tests themselves.
       - name: clippy
-        run: nix develop -c cargo clippy -- -D warnings
+        run: nix develop -c cargo clippy --all-targets --features gui -- -D warnings
 
       - name: test
         run: nix develop -c cargo test
 
       - name: nix build
-        run: nix build
+        run: nix build --no-link .#default .#gui
