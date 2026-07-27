@@ -481,6 +481,8 @@ fn control_loop(
     // comes back untouched, so a screen going off does not lose the colour.
     let mut blanked = false;
     let mut screens_checked: Option<Instant> = None;
+    let mut lit_before_blanking = true;
+    let mut changed_while_blank = false;
     let mut warned_about_supply = false;
 
     for event in rx {
@@ -598,6 +600,9 @@ fn control_loop(
                             // the choice is remembered and shown when they are
                             // back rather than lighting an empty room.
                             let reports = if blanked {
+                                // Remembered and shown when the screens come
+                                // back, rather than lighting an empty room.
+                                changed_while_blank = true;
                                 Vec::new()
                             } else {
                                 wanted.reports(lighting.as_ref())
@@ -698,23 +703,34 @@ fn control_loop(
                         if dark != blanked {
                             blanked = dark;
 
-                            let wanted = if dark {
-                                protocol::Lighting {
-                                    mode: protocol::LightMode::Off,
-                                    indicators: false,
-                                    ..lighting.unwrap_or_default()
-                                }
+                            // Power and indicators only: the pattern lives in
+                            // the cooler's own flash, so putting the strip out
+                            // and lighting it again brings back exactly what
+                            // was showing - nothing uploaded, and nothing
+                            // assumed about a state that was never recorded.
+                            let reports = if dark {
+                                lit_before_blanking = strip_on.unwrap_or(true);
+                                changed_while_blank = false;
+
+                                vec![protocol::light_off(), protocol::gear_light(false)]
+                            } else if changed_while_blank {
+                                lighting.unwrap_or_default().reports(None)
                             } else {
-                                lighting.unwrap_or_default()
+                                let indicators =
+                                    lighting.is_none_or(|lighting| lighting.indicators);
+                                let mut reports = vec![protocol::gear_light(indicators)];
+
+                                if lit_before_blanking {
+                                    reports.insert(0, protocol::light_on());
+                                }
+
+                                reports
                             };
 
-                            match send_all(dev, wanted.reports(None)) {
+                            match send_all(dev, reports) {
                                 Reply::Ok { .. } => {
-                                    info!(
-                                        "screens {}, lighting {wanted}",
-                                        if dark { "off" } else { "on" }
-                                    );
-                                    strip_on = Some(wanted.mode != protocol::LightMode::Off);
+                                    info!("screens {}", if dark { "off" } else { "on" });
+                                    strip_on = Some(if dark { false } else { lit_before_blanking });
                                 }
                                 other => warn!("cannot follow the screens: {other:?}"),
                             }
