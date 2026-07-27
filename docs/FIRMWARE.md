@@ -44,6 +44,11 @@ same 25-byte command protocol (`ram:000028a8` registers the one RX callback
   - Report Map `0x2A4B` value at flash `ram:000291D4`, decoded in 1.4.
   - A third Report characteristic (`ram:00029DEC`, Feature-shaped) exists in the table but
     is absent from the descriptor and is dead.
+- **Battery Service `0x180F`** with Battery Level `0x2A19` (attribute table imaged at
+  `ram:00029b24`). Advertised in the scan response alongside HID. It reports a hard-coded
+  94% that is unrelated to any measurement — see 4.4.
+- **Device Information `0x180A`** and **Scan Parameters `0x1813`** are also present in the
+  UUID pool and the HID init cluster (`0x180A` at `ram:00029948`, `0x1813` at `ram:00029988`).
 - **Vendor service `0xFFF0`** (`ram:000038E2`, attribute table imaged at `ram:00029A14`):
   - `0xFFF2` at `ram:00029A34`, permission **`0x03` = plain READ|WRITE, no encryption**.
     Host -> device commands.
@@ -606,10 +611,124 @@ Enforcement is two-part and both parts are silent clamps, not rejections:
   supply improves via `fan_on_supply_level_change` (`ram:00006350`), which — note — overwrites
   a realtime target with the gear speed without checking the realtime flag. PROVEN.
 
-There is **no battery** (only ADC channels used are 0 = rail and 15 = internal temp inside
-the WCH library; no charge IC, no BLE Battery Service) and **no watchdog**
-(`R8_WDOG_COUNT` has zero xrefs). Any CPU fault vectors to a software reset (`ram:00000500`),
-so an unexpected reboot is indistinguishable on the wire from a power cycle. PROVEN.
+The device has **no physical battery**: the only ADC channels used are 0 (the VBUS rail) and
+15 (the WCH library's internal temperature sensor), there is no charge controller
+transaction, no coulomb counter and no charge-status GPIO, and losing VBUS resets the MCU.
+PROVEN by exhaustive absence.
+
+**However, the firmware does expose a BLE Battery Service that reports a hard-coded 94%.**
+This is not a contradiction of the paragraph above but it is a correction to an earlier
+version of this document, which claimed there was "no BLE Battery Service" — that claim was
+wrong. See 4.4.
+
+There is **no watchdog** (`R8_WDOG_COUNT` has zero xrefs). Any CPU fault vectors to a
+software reset (`ram:00000500`), so an unexpected reboot is indistinguishable on the wire
+from a power cycle. PROVEN.
+
+### 4.4 The BLE Battery Service and the phantom 94%
+
+**Erratum.** An earlier revision of this document stated flatly that there is no BLE Battery
+Service. That was wrong, and the error came from a search for `0x180F` as an *instruction
+operand*; the UUID is stored as a **data constant** in a flash-resident pool, so the search
+could never have matched. Hosts really do see a battery percentage, and it really does come
+from this firmware.
+
+**It is a GATT Battery Service, not HID battery reporting.** Both candidate mechanisms were
+checked:
+
+- *Ruled out — HID.* The report descriptor at `ram:000291D4` (decoded in full in 1.4) is 38
+  bytes and declares only Usage Page `0xFFA0` (vendor), one 24-byte Input report (ID 1) and
+  one 24-byte Output report (ID 2). It contains **no** Generic Device Controls page (`05 06`)
+  and **no** Battery Strength usage (`09 20`), so the kernel's `hid-input` has nothing to turn
+  into a power_supply device. PROVEN.
+- *Confirmed — GATT.* UUID `0x2A19` (Battery Level) is at `ram:0002991c` and `0x180F`
+  (Battery Service) at `ram:00029920`, with the `{len=2, pUUID}` descriptor at `ram:00029924`.
+  `0x180F` is also advertised in the scan response (`05 02 12 18 0F 18` = HID + Battery). The
+  attribute table is imaged at `ram:00029b24` (copied to RAM at boot with the rest of `.data`
+  block 2):
+
+  | attr | type | perms | pValue | meaning |
+  |------|------|-------|--------|---------|
+  | `ram:00029b24` | `0x2800` primary service | `0x01` R | -> `0x29924` (`0x180F`) | Battery Service declaration |
+  | `ram:00029b34` | `0x2803` char decl | `0x01` R | `0x20002738` = `0x12` | properties Read+Notify |
+  | `ram:00029b44` | **`0x2A19` Battery Level** | **`0x01` plain READ** | **`0x20002737`** | **the percentage byte** |
+  | `ram:00029b54` | `0x2902` CCCD | `0x03` R+W | `0x20005684` | notification enable |
+  | `ram:00029b64` | `0x2908` report ref | `0x01` R | `0x20002740` | |
+
+  Note the value's permission is `0x01` = plain READ with **no encryption**, so an unpaired
+  peer can read it, consistent with the unauthenticated vendor channel in 1.1.
+
+**Where the number comes from.** The level byte at `0x20002737` lives in `.data` block 2, so
+it has a flash initial value: LMA `0x29FA7` = **`0x64` = 100**. It is updated only by
+`Batt_MeasLevel` at `ram:00007ec8`, which is the stock TI/WCH `battservice.c` routine:
+
+```c
+level = battMeasure();                    // ram:00007c36
+if (level < battLevel) {                  // monotonic: only ever decreases
+    battLevel = level;                    // sb a0, -0x7e1(gp)  @ ram:00007ed8
+    battNotifyLevel();                    // ram:000131da -> GATT notify
+}
+```
+
+`battMeasure` (`ram:00007c36`) does **not read the ADC**. It reads two u16s and applies the
+stock SDK formula:
+
+```
+maxLevel = *(u16*)0x2000273A   (gp-0x7de)
+measured = *(u16*)0x2000273C   (gp-0x7dc)
+if (maxLevel < 401) return 100;
+if (measured >= 400) return 0;
+n     = ((maxLevel + 1) - measured) >> 2
+level = ((400 - measured) * 25 + (n - 1)) / n
+```
+
+Both inputs are `.data` constants from LMA `0x29FAA` / `0x29FAC`: **`maxLevel = 409`** and
+**`measured = 273`**. Substituting:
+
+```
+n     = ((409 + 1) - 273) >> 2 = 137 >> 2 = 34
+level = ((400 - 273) * 25 + 33) / 34 = (3175 + 33) / 34 = 3208 / 34 = 94   (integer division)
+```
+
+**= 94, exactly the value observed on the host.** PROVEN.
+
+**Is it constant?** Yes, permanently. Verified by exhaustive gp-relative operand search:
+
+- `gp-0x7dc` (`0x2000273C`, the "measured" input): **one instruction touches it in the entire
+  image, and it is a load** (`lhu` at `ram:00007c5a`, inside `battMeasure`). Nothing ever
+  writes it.
+- `gp-0x7de` (`0x2000273A`, maxLevel): likewise only a load, at `ram:00007c4e`.
+- The three optional SDK hooks that could have made it dynamic — setup `gp-0x6b4`, teardown
+  `gp-0x6b0`, and a custom percentage callback `gp-0x6b8` — are **never assigned anywhere**.
+  The only instructions mentioning them are the `addi` address computations inside
+  `battMeasure` itself that test them for NULL; they are in BSS, so they are zero and the
+  built-in formula always runs. (A `sw ..., -0x6b8, a4` does appear in `cmd_42_upload_block`,
+  but that is `a4`-relative, not `gp`-relative, and is the animation cursor — unrelated.)
+
+So the value is **not** derived from the VBUS ADC, not a table indexed by supply level, and
+not uninitialised memory. It is a compile-time constant that the stock WCH SDK's arithmetic
+happens to turn into 94.
+
+**Does it change?** Only once, and only downward. The HID-over-GATT task `ram:00008344`
+fires event 2, which calls `Batt_MeasLevel` and re-arms with
+`tmos_start_task(taskId, 2, 15000)` = 15000 x 625 us = **9.375 s**. So roughly every 9.4
+seconds the firmware recomputes 94. The first measurement (94) is less than the initial 100,
+so it writes 94 and sends a notification; on every subsequent run `94 < 94` is false, so the
+value is frozen at 94 for the rest of the device's life. A host that subscribes early may
+observe a single 100 -> 94 transition; thereafter it never moves. **It will never track the
+supply, so it is not even a crude power-quality indicator — it carries no information at
+all.** PROVEN.
+
+**Is it exposed anywhere else?** No. `0x20002737` is not part of the `0xEF` status payload
+(which is `0x20003B68`..`0x20003B72`), and no command handler reads it — the only accessors
+are the `battservice.c` internals in the `ram:00007d20`..`ram:00007ed8` range (the GATT
+read/notify callbacks and the SDK's own get/set parameter helpers), none of which is reachable
+from `cmd_dispatch`. The percentage is readable **only** over GATT characteristic `0x2A19`.
+PROVEN.
+
+**Client guidance:** ignore the battery percentage entirely, and if `flydigictl` ever surfaces
+device status it should suppress it rather than pass it through — a desktop Bluetooth panel
+showing "94%" for a mains-powered cooler is a stock-SDK artefact, not a reading.
 
 ---
 
@@ -786,6 +905,8 @@ setting 4 (`0x46`). PROVEN.
 | `0x20002718` | `g_checksum_enforce` | 1 = enforce RX checksum (boot default 1); `0xF1`/`0xF2` toggle |
 | `0x2000280B` | `g_status_enable` | `0xEF` push enable (boot default 1); `0xED`/`0xEE` toggle |
 | `0x20002808` | boot-grace flag | set 1s after boot; gates button + first frames |
+| `0x20002737` | `g_ble_battery_level_pct` | BLE Battery Level `0x2A19` value; init 100, becomes 94 once, then frozen |
+| `0x2000273A` / `0x2000273C` | `g_batt_maxlevel_const_409` / `g_batt_measured_const_273` | `.data` constants that produce the fake 94%; never written |
 | `0x20002821` | `g_settings_dirty` | settings block needs flushing |
 | `0x20002824` / `0x20002828` | 1VPI magic / scratch byte | `0x09`/`0x0A` host scratch |
 | `0x20002834` | `g_supply_level` | 0/1/2/3, decided once per boot |

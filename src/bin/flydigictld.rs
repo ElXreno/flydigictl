@@ -549,6 +549,12 @@ fn control_loop(
     let mut manual_rpm = config.manual_rpm;
     let mut lighting = config.lighting;
 
+    // Bumped whenever the configuration changes under a client's feet, which
+    // a rebuild does: the daemon rereads the file and says nothing, so an
+    // interface holding a copy from before would go on drawing yesterday's
+    // curves. Status carries it; a client that sees it move refetches.
+    let mut revision: u64 = 0;
+
     // What the cooler is believed to be holding, as opposed to what is wanted.
     //
     // Uploading an animation erases and rewrites a fixed page of the cooler's
@@ -572,6 +578,7 @@ fn control_loop(
                 Ok(fresh) => {
                     if fresh != *config {
                         info!("config reloaded from {}", config_path.display());
+                        revision += 1;
 
                         if fresh.manual_rpm != config.manual_rpm {
                             manual_rpm = fresh.manual_rpm;
@@ -607,6 +614,7 @@ fn control_loop(
 
                     Request::SetConfig { config: fresh } => {
                         *config = fresh;
+                        revision += 1;
                         config.manual_rpm = manual_rpm;
                         config.lighting = lighting;
                         for curve in &mut config.curves {
@@ -1003,6 +1011,7 @@ fn control_loop(
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 asleep: curves.asleep.clone(),
                                 unreadable: curves.unreadable.clone(),
+                                revision,
                                 demands: demands.clone(),
                             }));
                         }

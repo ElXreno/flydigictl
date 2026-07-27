@@ -146,6 +146,7 @@ impl Status {
             leading: None,
             asleep: Vec::new(),
             unreadable: Vec::new(),
+            revision: 0,
             demands: Vec::new(),
         }
     }
@@ -196,6 +197,12 @@ pub struct Status {
     /// Curves whose sensor is there and awake and still gives nothing, which
     /// is a permission or a driver problem rather than a state to wait out.
     pub unreadable: Vec<String>,
+
+    /// Bumped every time the configuration changes, including when the daemon
+    /// rereads it off disk after a rebuild. A client holding a copy compares
+    /// this and refetches rather than drawing a configuration that is no
+    /// longer in force.
+    pub revision: u64,
 
     /// Every curve's reading and demand, for graphs and debugging.
     pub demands: Vec<Demand>,
