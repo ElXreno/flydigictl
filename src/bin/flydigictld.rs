@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 
-use flydigictl::config::{Config, ConfigError, Point, Sensor, Smoothing};
+use flydigictl::config::{Config, ConfigError, Kind, Point, Sensor, Smoothing};
 use flydigictl::curve::{self, Demand, Smoothed};
 use flydigictl::device::Device;
 use flydigictl::error::Error;
 use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
 use flydigictl::protocol::{self, MAX_RPM, MIN_RPM, STOP_RPM};
-use flydigictl::{screens, sensor, watch};
+use flydigictl::{nvidia, screens, sensor, watch};
 
 /// The cooler reports itself every 500 ms; the loop wakes far more often than
 /// that because a command waits for it to come back from reading. Frames are
@@ -96,10 +96,46 @@ struct Runner {
     sensor: Sensor,
     points: Vec<Point>,
     panic_c: u8,
-    /// Resolved lazily and retried: a hwmon can appear after we start, and
+    /// Resolved lazily and retried: a chip can appear after we start, and
     /// giving up once would mean never running that curve again.
-    paths: Vec<PathBuf>,
+    source: Source,
     smoothed: Option<Smoothed>,
+}
+
+/// Where a curve's readings come from, once resolved.
+enum Source {
+    /// Every input the curve matches; the hottest of them is what it follows.
+    Hwmon(Vec<PathBuf>),
+    Nvidia(String),
+}
+
+impl Source {
+    fn find(sensor: &Sensor) -> Self {
+        match sensor.kind {
+            Kind::Hwmon => Self::Hwmon(sensor::resolve_all(sensor)),
+            Kind::Nvidia => Self::Nvidia(if sensor.device.is_empty() {
+                nvidia::cards().first().cloned().unwrap_or_default()
+            } else {
+                sensor.device.clone()
+            }),
+        }
+    }
+
+    fn missing(&self) -> bool {
+        match self {
+            Self::Hwmon(paths) => paths.is_empty(),
+            Self::Nvidia(card) => card.is_empty(),
+        }
+    }
+
+    /// The reading to follow, or nothing when there is none to be had - which
+    /// for a sleeping GPU is the honest answer rather than a failure.
+    fn read(&self) -> Option<u8> {
+        match self {
+            Self::Hwmon(paths) => paths.iter().filter_map(|path| sensor::read(path)).max(),
+            Self::Nvidia(card) => nvidia::read_temperature(card),
+        }
+    }
 }
 
 struct Curves {
@@ -119,7 +155,7 @@ impl Curves {
                 sensor: curve.sensor.clone(),
                 points: curve.points.clone(),
                 panic_c: curve.panic_c.unwrap_or(config.smoothing.panic_c),
-                paths: sensor::resolve_all(&curve.sensor),
+                source: Source::find(&curve.sensor),
                 smoothed: None,
             })
             .collect();
@@ -137,7 +173,7 @@ impl Curves {
         let missing: Vec<&str> = self
             .runners
             .iter()
-            .filter(|runner| runner.paths.is_empty())
+            .filter(|runner| runner.source.missing())
             .map(|runner| runner.name.as_str())
             .collect();
 
@@ -170,21 +206,14 @@ impl Curves {
         let mut demands = Vec::new();
 
         for runner in &mut self.runners {
-            if runner.paths.is_empty() {
-                runner.paths = sensor::resolve_all(&runner.sensor);
-                if !runner.paths.is_empty() {
+            if runner.source.missing() {
+                runner.source = Source::find(&runner.sensor);
+                if !runner.source.missing() {
                     info!("curve {}: sensor found", runner.name);
                 }
             }
 
-            // Several inputs behind one curve (two DIMMs, two drives) collapse
-            // to the hottest: that is the one needing air.
-            let Some(raw) = runner
-                .paths
-                .iter()
-                .filter_map(|path| sensor::read(path))
-                .max()
-            else {
+            let Some(raw) = runner.source.read() else {
                 continue;
             };
 
@@ -564,18 +593,33 @@ fn control_loop(
                         }
                     },
 
-                    Request::Sensors => Reply::Sensors {
-                        sensors: sensor::list()
+                    Request::Sensors => {
+                        let mut sensors: Vec<ipc::SensorInfo> = sensor::list()
                             .into_iter()
                             .map(|entry| ipc::SensorInfo {
+                                kind: Kind::Hwmon,
                                 hwmon: entry.hwmon,
                                 device: entry.device,
                                 kernel: entry.kernel,
                                 label: entry.label,
                                 temp_c: sensor::read(&entry.path),
                             })
-                            .collect(),
-                    },
+                            .collect();
+
+                        // Asking a sleeping card for its temperature would wake
+                        // it, so the listing carries its power state instead
+                        // and leaves the reading empty.
+                        sensors.extend(nvidia::cards().into_iter().map(|card| ipc::SensorInfo {
+                            kind: Kind::Nvidia,
+                            hwmon: "nvidia".to_string(),
+                            kernel: nvidia::power_state(&card).unwrap_or_default(),
+                            temp_c: nvidia::read_temperature(&card),
+                            device: card,
+                            label: String::new(),
+                        }));
+
+                        Reply::Sensors { sensors }
+                    }
 
                     Request::Gears => match device.as_mut() {
                         None => Reply::Error {

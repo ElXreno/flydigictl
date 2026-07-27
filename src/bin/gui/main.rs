@@ -16,7 +16,7 @@ use iced::widget::{
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 
-use flydigictl::config::{Config, Curve, Point, Sensor};
+use flydigictl::config::{Config, Curve, Kind, Point, Sensor};
 use flydigictl::curve;
 use flydigictl::ipc::{self, Status, Warning, WarningCode};
 use flydigictl::protocol::{LightMode, Lighting, Rgb, Standby, EFFECT_COUNT, MAX_RPM, MIN_RPM};
@@ -173,7 +173,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
     // No readings: the list is built once per connection, so a number in it
     // would sit stale in the closed picker.
     let mut chips: BTreeMap<&str, BTreeMap<&str, Vec<&ipc::SensorInfo>>> = BTreeMap::new();
-    for entry in sensors {
+    for entry in sensors.iter().filter(|entry| entry.kind == Kind::Hwmon) {
         chips
             .entry(&entry.hwmon)
             .or_default()
@@ -183,6 +183,28 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
     }
 
     let mut choices: Vec<SensorChoice> = Vec::new();
+
+    // A card is one entry and no more: it has a single temperature, and it is
+    // only readable while it is awake.
+    for card in sensors.iter().filter(|entry| entry.kind == Kind::Nvidia) {
+        choices.push(SensorChoice {
+            label: format!(
+                "nvidia {}{}",
+                flydigictl::sensor::short_address(&card.device),
+                if card.kernel.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", card.kernel)
+                }
+            ),
+            sensor: Sensor {
+                kind: Kind::Nvidia,
+                hwmon: String::new(),
+                device: card.device.clone(),
+                label: String::new(),
+            },
+        });
+    }
 
     for (hwmon, devices) in &chips {
         let several = devices.len() > 1;
@@ -203,6 +225,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
                 format!("{hwmon} (hottest)")
             },
             sensor: Sensor {
+                kind: Kind::Hwmon,
                 hwmon: hwmon.to_string(),
                 device: String::new(),
                 label: String::new(),
@@ -213,6 +236,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
             choices.push(SensorChoice {
                 label: format!("{hwmon}{}/{label}", if several { " (all)" } else { "" }),
                 sensor: Sensor {
+                    kind: Kind::Hwmon,
                     hwmon: hwmon.to_string(),
                     device: String::new(),
                     label: label.to_string(),
@@ -230,6 +254,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
             choices.push(SensorChoice {
                 label: format!("{named} (hottest)"),
                 sensor: Sensor {
+                    kind: Kind::Hwmon,
                     hwmon: hwmon.to_string(),
                     device: device.to_string(),
                     label: String::new(),
@@ -244,6 +269,7 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
                 choices.push(SensorChoice {
                     label: format!("{named}/{}", entry.label),
                     sensor: Sensor {
+                        kind: Kind::Hwmon,
                         hwmon: hwmon.to_string(),
                         device: device.to_string(),
                         label: entry.label.clone(),
@@ -260,6 +286,12 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
 ///
 /// The same matching the daemon does: an empty field accepts anything.
 fn sensor_exists(sensors: &[ipc::SensorInfo], sensor: &Sensor) -> bool {
+    if sensor.kind == Kind::Nvidia {
+        return sensors
+            .iter()
+            .any(|entry| entry.kind == Kind::Nvidia && entry.device == sensor.device);
+    }
+
     sensors.iter().any(|entry| {
         entry.hwmon == sensor.hwmon
             && (sensor.device.is_empty()

@@ -3,6 +3,7 @@ pub mod curve;
 pub mod device;
 pub mod error;
 pub mod ipc;
+pub mod nvidia;
 pub mod protocol;
 pub mod screens;
 pub mod sensor;

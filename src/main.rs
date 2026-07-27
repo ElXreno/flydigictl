@@ -235,6 +235,18 @@ fn run() -> Result<()> {
         if available.is_empty() {
             return Err(Error::Config("no hwmon sensors found".to_string()));
         }
+        for card in flydigictl::nvidia::cards() {
+            let state = flydigictl::nvidia::power_state(&card).unwrap_or_default();
+            println!(
+                "{:<24} {:<20} {:<12} {}",
+                "nvidia",
+                card,
+                state,
+                flydigictl::nvidia::read_temperature(&card)
+                    .map_or("-".to_string(), |t| format!("{t} C")),
+            );
+        }
+
         for entry in available {
             let temp = flydigictl::sensor::read(&entry.path);
             println!(

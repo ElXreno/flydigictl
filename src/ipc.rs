@@ -78,6 +78,9 @@ pub enum Reply {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SensorInfo {
+    /// `hwmon` for anything the kernel exposes, `nvidia` for a card that has to
+    /// be asked with the vendor tool and only while it is awake.
+    pub kind: crate::config::Kind,
     pub hwmon: String,
     /// Stable address of the chip, which is what tells two of a kind apart.
     pub device: String,

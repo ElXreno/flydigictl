@@ -107,6 +107,14 @@ pub fn describe(curve: &Curve, index: usize) -> String {
     if !curve.name.is_empty() {
         return curve.name.clone();
     }
+    if curve.sensor.kind == crate::config::Kind::Nvidia {
+        return if curve.sensor.device.is_empty() {
+            format!("nvidia#{index}")
+        } else {
+            format!("nvidia {}", curve.sensor.device)
+        };
+    }
+
     let chip = if curve.sensor.device.is_empty() {
         curve.sensor.hwmon.clone()
     } else {
