@@ -19,6 +19,17 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 6G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-last-accessed: P1DT12H
+          purge-primary-key: never
+
       # Every target and every feature: the interface sits behind `gui` and was
       # not being linted at all, and without `--all-targets` neither were the
       # tests themselves.
