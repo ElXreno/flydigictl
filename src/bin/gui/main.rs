@@ -188,14 +188,11 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
     // only readable while it is awake.
     for card in sensors.iter().filter(|entry| entry.kind == Kind::Nvidia) {
         choices.push(SensorChoice {
+            // Its power state is in the listing too, but a picker built once
+            // per connection would show yesterday's.
             label: format!(
-                "nvidia {}{}",
-                flydigictl::sensor::short_address(&card.device),
-                if card.kernel.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", card.kernel)
-                }
+                "nvidia {}",
+                flydigictl::sensor::short_address(&card.device)
             ),
             sensor: Sensor {
                 kind: Kind::Nvidia,
@@ -287,9 +284,10 @@ fn sensor_choices(sensors: &[ipc::SensorInfo]) -> Vec<SensorChoice> {
 /// The same matching the daemon does: an empty field accepts anything.
 fn sensor_exists(sensors: &[ipc::SensorInfo], sensor: &Sensor) -> bool {
     if sensor.kind == Kind::Nvidia {
-        return sensors
-            .iter()
-            .any(|entry| entry.kind == Kind::Nvidia && entry.device == sensor.device);
+        return sensors.iter().any(|entry| {
+            entry.kind == Kind::Nvidia
+                && (sensor.device.is_empty() || entry.device == sensor.device)
+        });
     }
 
     sensors.iter().any(|entry| {
@@ -1257,16 +1255,26 @@ fn editor_pane(state: &State) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let sensor = if curve.sensor.label.is_empty() {
-        format!("{}, hottest input", curve.sensor.hwmon)
-    } else {
-        format!("{}/{}", curve.sensor.hwmon, curve.sensor.label)
+    let sensor = match (curve.sensor.kind, curve.sensor.label.is_empty()) {
+        // A card curve carries no hwmon at all, so naming one would be naming
+        // whatever the empty config happened to default to.
+        (Kind::Nvidia, _) => "nvidia, first card".to_string(),
+        (_, true) => format!("{}, hottest input", curve.sensor.hwmon),
+        (_, false) => format!("{}/{}", curve.sensor.hwmon, curve.sensor.label),
     };
 
     let chosen = state
         .sensors
         .iter()
-        .find(|choice| choice.sensor == curve.sensor)
+        // A card curve without an address means the first one, which is what
+        // the daemon reads, so point the picker at that entry rather than
+        // calling the curve unmatched.
+        .find(|choice| {
+            choice.sensor == curve.sensor
+                || (curve.sensor.kind == Kind::Nvidia
+                    && curve.sensor.device.is_empty()
+                    && choice.sensor.kind == Kind::Nvidia)
+        })
         .cloned()
         .or_else(|| {
             // A curve can address something the picker has no entry for: a

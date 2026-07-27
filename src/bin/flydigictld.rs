@@ -839,12 +839,19 @@ fn control_loop(
                     Ok(status) => {
                         missed = Duration::ZERO;
 
-                        if due && leader.is_none() {
+                        if due && demands.is_empty() {
                             debug!("no temperature yet");
                         }
 
-                        // A manual speed overrides every curve, by design.
-                        let asked = manual_rpm.or(leader.as_ref().map(|d| d.rpm));
+                        // A manual speed overrides every curve, by design. With
+                        // no leader but readings in hand, every curve is content
+                        // and the answer is a stopped fan; with no readings at
+                        // all there is nothing to say, so the cooler is left as
+                        // it is.
+                        let asked = manual_rpm.or_else(|| match leader.as_ref() {
+                            Some(demand) => Some(demand.rpm),
+                            None => (!demands.is_empty()).then_some(STOP_RPM),
+                        });
 
                         // Sending more than the supply allows is not an error,
                         // the firmware just holds its ceiling - but then every
@@ -905,15 +912,18 @@ fn control_loop(
                             if moved || drifted {
                                 match apply(dev, wanted, status.mode) {
                                     Ok(()) => {
-                                        match &leader {
-                                            Some(d) => debug!(
+                                        match (&leader, manual_rpm) {
+                                            (Some(d), None) => debug!(
                                                 "target {wanted} rpm, led by {} at {} C (smoothed {}){}",
                                                 d.name,
                                                 d.temp_c,
                                                 d.smoothed_c,
                                                 if d.panic { ", panic" } else { "" }
                                             ),
-                                            None => debug!("target {wanted} rpm (manual)"),
+                                            (_, Some(_)) => debug!("target {wanted} rpm (manual)"),
+                                            (None, None) => {
+                                                debug!("target {wanted} rpm, every curve content")
+                                            }
                                         }
                                         applied = Some(wanted);
                                     }
