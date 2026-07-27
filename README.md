@@ -341,6 +341,14 @@ effect = 3
 Brightness applies to animations as well as to a plain colour: it is the same
 header byte either way, so dimming an effect keeps it running.
 
+`lights_follow_screens = true` puts the strip and the gear indicators out while
+every connected display is off, and brings them back with the first one that
+lights up. The daemon reads this from `/sys/class/drm`, where a compositor
+switching monitors off leaves either a disabled connector or a DPMS property
+that says so - no session, no desktop portal and no bus involved, which is what
+lets a system service know. The choice made meanwhile is remembered rather than
+applied, so nothing lights an empty room.
+
 ### Undoing
 
 Every change the interface sends is a snapshot, so `Ctrl+Z` walks back through

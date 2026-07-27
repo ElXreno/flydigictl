@@ -17,7 +17,7 @@ use flydigictl::device::Device;
 use flydigictl::error::Error;
 use flydigictl::ipc::{self, Reply, Request, Status, Warning, WarningCode};
 use flydigictl::protocol::{self, MAX_RPM, MIN_RPM, STOP_RPM};
-use flydigictl::{sensor, watch};
+use flydigictl::{screens, sensor, watch};
 
 /// The cooler reports itself every 500 ms; the loop wakes far more often than
 /// that because a command waits for it to come back from reading. Frames are
@@ -26,6 +26,10 @@ use flydigictl::{sensor, watch};
 /// of a couple of hundred. Curves are evaluated on their own, slower schedule.
 const FRAME_POLL: Duration = Duration::from_millis(50);
 const FRAME_TIMEOUT: Duration = Duration::from_millis(40);
+
+/// Screens do not change often, and asking the kernel costs a handful of file
+/// reads, so this is as often as it is worth asking.
+const SCREEN_POLL: Duration = Duration::from_secs(1);
 
 /// Silence this long means the cooler is gone rather than merely quiet.
 const SILENCE: Duration = Duration::from_secs(3);
@@ -472,6 +476,11 @@ fn control_loop(
     // a client's stale copy would undo changes made since it last read one.
     let mut manual_rpm = config.manual_rpm;
     let mut lighting = config.lighting;
+
+    // Blanked is not a lighting state of its own: the wanted one stays put and
+    // comes back untouched, so a screen going off does not lose the colour.
+    let mut blanked = false;
+    let mut screens_checked: Option<Instant> = None;
     let mut warned_about_supply = false;
 
     for event in rx {
@@ -585,7 +594,14 @@ fn control_loop(
                             message: "no cooler".to_string(),
                         },
                         Some(dev) => {
-                            let reports = wanted.reports(lighting.as_ref());
+                            // While the screens are off the cooler stays dark;
+                            // the choice is remembered and shown when they are
+                            // back rather than lighting an empty room.
+                            let reports = if blanked {
+                                Vec::new()
+                            } else {
+                                wanted.reports(lighting.as_ref())
+                            };
 
                             match send_all(dev, reports) {
                                 Reply::Ok { .. } => {
@@ -672,6 +688,39 @@ fn control_loop(
                     shared.lock().unwrap().publish(None);
                     continue;
                 };
+
+                if config.lights_follow_screens
+                    && screens_checked.is_none_or(|last| last.elapsed() >= SCREEN_POLL)
+                {
+                    screens_checked = Some(Instant::now());
+
+                    if let Some(dark) = screens::all_dark() {
+                        if dark != blanked {
+                            blanked = dark;
+
+                            let wanted = if dark {
+                                protocol::Lighting {
+                                    mode: protocol::LightMode::Off,
+                                    indicators: false,
+                                    ..lighting.unwrap_or_default()
+                                }
+                            } else {
+                                lighting.unwrap_or_default()
+                            };
+
+                            match send_all(dev, wanted.reports(None)) {
+                                Reply::Ok { .. } => {
+                                    info!(
+                                        "screens {}, lighting {wanted}",
+                                        if dark { "off" } else { "on" }
+                                    );
+                                    strip_on = Some(wanted.mode != protocol::LightMode::Off);
+                                }
+                                other => warn!("cannot follow the screens: {other:?}"),
+                            }
+                        }
+                    }
+                }
 
                 let interval = Duration::from_secs(config.interval_secs.max(1));
                 let due = evaluated.is_none_or(|last| last.elapsed() >= interval);

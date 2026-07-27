@@ -40,6 +40,13 @@ pub struct Config {
     /// the cooler was already set to.
     pub standby: Option<crate::protocol::Standby>,
 
+    /// Turn the lights off while every screen is off, and put them back when
+    /// one comes on.
+    ///
+    /// A cooler under a laptop nobody is looking at has no one to light for,
+    /// and it is usually the brightest thing left in a dark room.
+    pub lights_follow_screens: bool,
+
     /// Lighting to put back whenever a cooler turns up.
     ///
     /// The strip keeps an uploaded animation in its own flash, but nothing
@@ -156,6 +163,7 @@ impl Default for Config {
             hysteresis_rpm: 100,
             manual_rpm: None,
             standby: Some(crate::protocol::Standby::Delayed),
+            lights_follow_screens: false,
             lighting: None,
         }
     }

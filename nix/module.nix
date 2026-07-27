@@ -53,6 +53,7 @@ in
           interval_secs = 3;
           hysteresis_rpm = 100;
           standby = "delayed";
+          lights_follow_screens = true;
           lighting = {
             mode = { mode = "effect"; effect = 3; };
             brightness = 60;
