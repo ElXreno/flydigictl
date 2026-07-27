@@ -866,4 +866,129 @@ mod tests {
 
         assert_eq!(exit_realtime()[5], 0x26);
     }
+
+    /// Every report this crate can produce, for the checks that have to hold
+    /// for all of them. Built once here so a new command has to be added to
+    /// the list to compile, rather than quietly escaping the bounds below.
+    fn every_report() -> Vec<(&'static str, [u8; REPORT_LEN])> {
+        let lighting = Lighting {
+            mode: LightMode::Static {
+                color: Rgb { r: 9, g: 200, b: 7 },
+            },
+            brightness: 63,
+            indicators: true,
+        };
+
+        let mut reports: Vec<(&'static str, [u8; REPORT_LEN])> = vec![
+            ("enter_realtime", enter_realtime()),
+            ("exit_realtime", exit_realtime()),
+            ("set_realtime_rpm", set_realtime_rpm(2600)),
+            ("stop", set_realtime_rpm(STOP_RPM)),
+            ("query_supply", query_supply()),
+            ("query_strip", query_strip()),
+            ("query_gear_table", query_gear_table()),
+            ("light_off", light_off()),
+            ("light_on", light_on()),
+            ("gear_light", gear_light(true)),
+            ("set_standby", set_standby(Standby::Delayed)),
+        ];
+
+        reports.push((
+            "set_gear_rpm",
+            set_gear_rpm(Gear::Standard, 2000).expect("a real gear has a slot"),
+        ));
+
+        reports.extend(
+            light_static(Rgb { r: 1, g: 2, b: 3 }, 100)
+                .into_iter()
+                .map(|report| ("light_static", report)),
+        );
+        reports.extend(
+            light_effect(5, 50)
+                .into_iter()
+                .map(|report| ("light_effect", report)),
+        );
+        reports.extend(
+            lighting
+                .reports(None)
+                .into_iter()
+                .map(|report| ("lighting", report)),
+        );
+
+        reports
+    }
+
+    /// The firmware's own formula, written out again rather than reusing
+    /// `checksum`: a test that calls the code it is checking proves nothing.
+    #[test]
+    fn checksum_matches_the_firmware_formula() {
+        for (name, report) in every_report() {
+            let len = report[4] as usize;
+            let payload = &report[5..5 + (len - 2)];
+
+            let expected = (u32::from(report[3])
+                + u32::from(report[4])
+                + payload.iter().map(|byte| u32::from(*byte)).sum::<u32>())
+                & 0xFF;
+
+            assert_eq!(
+                u32::from(report[5 + (len - 2)]),
+                expected,
+                "checksum of {name}"
+            );
+        }
+    }
+
+    /// The HID path rejects a frame whose length byte is above 0x11 without a
+    /// word of complaint, so a report that grows past it would simply stop
+    /// working. Also the report id and magic, which gate it even earlier.
+    #[test]
+    fn every_report_stays_inside_the_firmware_bounds() {
+        for (name, report) in every_report() {
+            assert_eq!(report[0], REPORT_ID_OUT, "report id of {name}");
+            assert_eq!(&report[1..3], &MAGIC, "magic of {name}");
+
+            let len = report[4];
+            assert!(len >= 2, "{name} declares a length below the header");
+            assert!(len <= 0x11, "{name} declares {len}, past the 0x11 ceiling");
+            assert!(
+                usize::from(len) - 2 <= MAX_PAYLOAD,
+                "{name} carries more than {MAX_PAYLOAD} payload bytes"
+            );
+        }
+    }
+
+    /// Three commands in the firmware are destructive or corrupting, and none
+    /// of them has a use here: 0xDF erases the firmware and reboots into the
+    /// ROM loader, 0x06 is a factory reset, and 0x08 with an out-of-range gear
+    /// corrupts the stored table. Nothing this crate builds may be one.
+    #[test]
+    fn never_builds_a_dangerous_command() {
+        for (name, report) in every_report() {
+            assert!(
+                !matches!(report[3], 0xDF | 0x06 | 0x08),
+                "{name} builds command 0x{:02X}",
+                report[3]
+            );
+        }
+    }
+
+    /// `0x26` takes a slot, and the firmware answers `00` for anything above
+    /// three rather than clamping, so an unknown gear must never reach it.
+    #[test]
+    fn gear_writes_carry_a_slot_the_firmware_accepts() {
+        for gear in Gear::ALL {
+            let slot = gear.slot().expect("every listed gear has a slot");
+            assert!(slot <= 3, "{gear} maps to slot {slot}");
+
+            let report = set_gear_rpm(gear, 2000).expect("a real gear builds a report");
+            assert_eq!(report[3], CMD_SET_GEAR_RPM);
+            assert_eq!(report[5], slot);
+        }
+
+        assert!(
+            set_gear_rpm(Gear::Unknown(9), 2000).is_none(),
+            "an unknown gear must not be written"
+        );
+    }
 }
