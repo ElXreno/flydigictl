@@ -166,6 +166,10 @@ struct Curves {
     /// Curves that read nothing because the thing they watch is asleep, which
     /// is not the same as a sensor that is missing or broken.
     asleep: Vec<String>,
+
+    /// Curves whose sensor is present and awake and still gave nothing, which
+    /// on this machine means the daemon cannot get at it.
+    unreadable: Vec<String>,
 }
 
 impl Curves {
@@ -189,6 +193,7 @@ impl Curves {
             smoothing: config.smoothing,
             complained: false,
             asleep: Vec::new(),
+            unreadable: Vec::new(),
         };
         curves.complain_about_missing();
         curves
@@ -230,6 +235,7 @@ impl Curves {
     fn evaluate(&mut self, dt_secs: f32) -> Vec<Demand> {
         let mut demands = Vec::new();
         self.asleep.clear();
+        self.unreadable.clear();
 
         for runner in &mut self.runners {
             if runner.source.missing() {
@@ -240,8 +246,13 @@ impl Curves {
             }
 
             let Some(raw) = runner.source.read() else {
+                // Three different silences, and a client cannot act on them the
+                // same way: asleep is fine and expected, unreadable is a sensor
+                // that is there and will not answer, missing is already said.
                 if runner.source.sleeping() {
                     self.asleep.push(runner.name.clone());
+                } else if !runner.source.missing() {
+                    self.unreadable.push(runner.name.clone());
                 }
                 continue;
             };
@@ -538,6 +549,15 @@ fn control_loop(
     let mut manual_rpm = config.manual_rpm;
     let mut lighting = config.lighting;
 
+    // What the cooler is believed to be holding, as opposed to what is wanted.
+    //
+    // Uploading an animation erases and rewrites a fixed page of the cooler's
+    // flash, and it keeps that page across a reconnect and a power cut - so
+    // replaying the upload every time the link comes back spends an erase cycle
+    // to write bytes that are already there. This machine reconnects some fifty
+    // times a day, which is the difference between a decade and a year.
+    let mut uploaded: Option<protocol::Lighting> = None;
+
     // Blanked is not a lighting state of its own: the wanted one stays put and
     // comes back untouched, so a screen going off does not lose the colour.
     let mut blanked = false;
@@ -559,7 +579,11 @@ fn control_loop(
                         if fresh.lighting != config.lighting {
                             lighting = fresh.lighting;
                             if let (Some(dev), Some(lighting)) = (device.as_mut(), lighting) {
-                                let _ = send_all(dev, lighting.reports(None));
+                                if let Reply::Ok { .. } =
+                                    send_all(dev, lighting.reports(uploaded.as_ref()))
+                                {
+                                    uploaded = Some(lighting);
+                                }
                             }
                         }
 
@@ -687,13 +711,16 @@ fn control_loop(
                                 changed_while_blank = true;
                                 Vec::new()
                             } else {
-                                wanted.reports(lighting.as_ref())
+                                wanted.reports(uploaded.as_ref())
                             };
 
                             match send_all(dev, reports) {
                                 Reply::Ok { .. } => {
                                     info!("lighting {wanted}");
                                     lighting = Some(wanted);
+                                    if !blanked {
+                                        uploaded = Some(wanted);
+                                    }
                                     config.lighting = lighting;
                                     strip_on = Some(wanted.mode != protocol::LightMode::Off);
                                     Reply::Ok { warning: None }
@@ -763,8 +790,15 @@ fn control_loop(
                             .and_then(|payload| payload.first().map(|byte| *byte != 0));
 
                         if let Some(lighting) = lighting {
-                            match send_all(dev, lighting.reports(None)) {
-                                Reply::Ok { .. } => info!("lighting {lighting}"),
+                            // Against what the cooler already holds, not from
+                            // scratch: a reconnect does not empty its flash.
+                            match send_all(dev, lighting.reports(uploaded.as_ref())) {
+                                Reply::Ok { .. } => {
+                                    if uploaded != Some(lighting) {
+                                        info!("lighting {lighting}");
+                                        uploaded = Some(lighting);
+                                    }
+                                }
                                 other => warn!("cannot set the lighting: {other:?}"),
                             }
                         }
@@ -796,7 +830,10 @@ fn control_loop(
 
                                 vec![protocol::light_off(), protocol::gear_light(false)]
                             } else if changed_while_blank {
-                                lighting.unwrap_or_default().reports(None)
+                                let wanted = lighting.unwrap_or_default();
+                                let reports = wanted.reports(uploaded.as_ref());
+                                uploaded = Some(wanted);
+                                reports
                             } else {
                                 let indicators =
                                     lighting.is_none_or(|lighting| lighting.indicators);
@@ -965,6 +1002,7 @@ fn control_loop(
                                 strip_on,
                                 leading: leader.as_ref().map(|d| d.name.clone()),
                                 asleep: curves.asleep.clone(),
+                                unreadable: curves.unreadable.clone(),
                                 demands: demands.clone(),
                             }));
                         }

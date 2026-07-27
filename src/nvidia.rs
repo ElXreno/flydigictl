@@ -241,12 +241,16 @@ impl Part {
     }
 }
 
+/// Said once per process, not once per sensor: the listing builds a throwaway
+/// sensor per request, and a curve that cannot read its card retries every
+/// tick, so a per-instance flag still fills the journal.
+static COMPLAINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A card's temperature, for whoever wants it repeatedly.
 pub struct Sensor {
     card: String,
     part: Part,
     registers: Option<Registers>,
-    complained: bool,
 }
 
 impl Sensor {
@@ -255,7 +259,6 @@ impl Sensor {
             card: card.to_string(),
             part,
             registers: Registers::open(card),
-            complained: false,
         }
     }
 
@@ -282,8 +285,7 @@ impl Sensor {
         }
 
         let Some(registers) = self.registers.as_ref() else {
-            if !self.complained {
-                self.complained = true;
+            if !COMPLAINED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 log::warn!(
                     "cannot map {}/{}/resource0: nothing to read the GPU with",
                     PCI,

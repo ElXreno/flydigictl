@@ -1211,9 +1211,17 @@ fn curve_list(state: &State) -> Element<'_, Message> {
             .as_ref()
             .is_some_and(|status| status.asleep.contains(&name));
 
+        let unreadable = state
+            .status
+            .as_ref()
+            .is_some_and(|status| status.unreadable.contains(&name));
+
         let detail = match demand {
             Some(demand) => format!("{} C  ->  {} rpm", demand.temp_c, demand.rpm),
             None if asleep => "asleep".to_string(),
+            // Present, awake, and refusing to answer: the daemon cannot get at
+            // it, which is a thing to go and fix rather than wait out.
+            None if unreadable => "cannot read".to_string(),
             None => "no reading".to_string(),
         };
 
