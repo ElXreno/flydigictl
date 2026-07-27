@@ -1,5 +1,14 @@
 # Flydigi BS series HID protocol
 
+> **Superseded by [FIRMWARE.md](FIRMWARE.md).** This document was written from
+> the outside, by sending frames to a **BS3 Pro** and watching what came back;
+> the other one was read out of the firmware image and covers the whole command
+> surface with its argument ranges and refusal conditions. Where they disagree
+> the firmware is right, and section 11 there lists every correction - among
+> them the `0xEF` field layout, the origin of the 20-byte ceiling and the
+> supposed RPM ceiling at the highest supply level. This is kept for the
+> hardware-observed behaviour and the capture-level detail behind it.
+
 Reverse-engineered against a **BS3 Pro** paired over Bluetooth. Command codes
 come from [THRM](https://github.com/TIANLI0/THRM) (MIT); frame layout, the
 checksum and the mode byte values below were confirmed by hand against the
