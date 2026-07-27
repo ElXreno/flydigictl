@@ -20,7 +20,12 @@ inotify = { version = "0.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
-nix = { version = "0.29", default-features = false, features = ["poll"] }
+nix = { version = "0.29", default-features = false, features = [
+  "poll",
+  "mman",
+  # sysconf, for the page size the mapping has to be aligned to
+  "feature",
+] }
 thiserror = "2"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
