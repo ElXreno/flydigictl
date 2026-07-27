@@ -33,7 +33,8 @@ const DISPLAY: &str = "0x030";
 
 /// Memory temperature, in BAR0. Twelve bits, in thirty-seconds of a degree.
 ///
-/// The same offset across every Ada part, and publicly documented.
+/// The same offset across every Ada part, and public knowledge - an address and
+/// a scale, not anybody's code.
 const MEMORY: usize = 0xE2A8;
 
 /// Core temperature, in whole degrees in the low byte.

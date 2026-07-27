@@ -42,10 +42,12 @@ $ flydigictl auto
 released to gear mode
 
 $ flydigictl sensors
-k10temp                  Tctl         59 C
-amdgpu                   edge         41 C
-nvme                     Composite    33 C
-spd5118                  -            41 C
+nvidia   0000:01:00.0 (core)     active       46 C
+nvidia   0000:01:00.0 (memory)   active       48 C
+k10temp  0000:00:18.3            Tctl         59 C
+amdgpu   0000:66:00.0            edge         41 C
+nvme     0000:05:00.0 (nvme0)    Composite    33 C
+spd5118  0000:00:14.0/0050       -            41 C
 ```
 
 `set` holds a fixed speed until you call `auto`, power-cycle the cooler, or
@@ -164,8 +166,21 @@ receive an ACL. The second line matters for Bluetooth: those coolers hang off
 
 ## Protocol
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the frame layout, checksum and
-command codes, including which ones are verified against hardware.
+[docs/FIRMWARE.md](docs/FIRMWARE.md) is the reference: the complete command
+surface read out of the firmware itself, with argument ranges, what is clamped
+against what is refused, the acknowledgement semantics, the state machine and
+per-command acceptance criteria to test against.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) is the earlier map, written from black-box
+testing; where the two disagree the firmware wins, and section 11 of the
+former lists the corrections.
+
+**Do not send command `0xDF`.** It erases the firmware's first flash sector and
+reboots into the ROM bootloader, with no authentication and no payload gate, and
+the cooler will not run again until it is reflashed over USB. It is reachable
+from any unpaired Bluetooth peer, so it is worth knowing about even though
+nothing here sends it. `0x06` is a factory reset and `0x08` with an out-of-range
+gear corrupts the stored gear table; both are also unused here. If you fuzz this
+device, exclude those three.
 
 ## Credits
 
@@ -200,22 +215,24 @@ services.flydigictl = {
       {
         name = "ram";
         sensor.hwmon = "spd5118";     # both DIMMs, hottest one wins
-        panic_c = 80;
+        panic_c = 78;
         points = [
-          { temp_c = 45; rpm = 500; }
-          { temp_c = 55; rpm = 1500; }
-          { temp_c = 65; rpm = 2600; }
-          { temp_c = 75; rpm = 4000; }
+          { temp_c = 46; rpm = 0; }   # below this the fan stops entirely
+          { temp_c = 47; rpm = 500; } # one degree later, the slowest it holds
+          { temp_c = 58; rpm = 800; }
+          { temp_c = 70; rpm = 2200; }
+          { temp_c = 78; rpm = 4000; }
         ];
       }
       {
         name = "cpu";
         sensor = { hwmon = "k10temp"; label = "Tctl"; };
-        panic_c = 95;
+        panic_c = 92;
         points = [
-          { temp_c = 70; rpm = 500; }
-          { temp_c = 85; rpm = 2000; }
-          { temp_c = 95; rpm = 4000; }
+          { temp_c = 52; rpm = 0; }
+          { temp_c = 53; rpm = 600; }
+          { temp_c = 72; rpm = 1800; }
+          { temp_c = 92; rpm = 4000; }
         ];
       }
     ];
@@ -232,9 +249,17 @@ drive hide behind a cool processor. `flydigictl sensors` lists what is available
 to point a curve at; an empty `label` matches every input of that hwmon and
 takes the hottest, which covers both DIMMs or both drives in one curve.
 
-Speeds are interpolated between points, `rpm = 0` stops the fan, and the target
-is re-applied whenever the cooler falls back to gear mode, which it does after
-every reconnect.
+Speeds are interpolated between points and the target is re-applied whenever the
+cooler falls back to gear mode, which it does after every reconnect.
+
+`rpm = 0` stops the fan, and stopping is not the mirror image of starting.
+Anything between 1 and 500 rpm is a stall band - the blades barely turn and the
+tachometer flips between 0 and 400 - so a point or an interpolated value landing
+in it is rounded up to 500. A curve that means to stop should step from 0 to its
+first working speed across a single degree. Speeding up happens the moment a
+curve asks for it, while stopping waits for every curve to agree for a minute,
+because a stopped fan needs some twenty seconds of stall-and-retry to turn
+again. A speed set by hand is applied immediately either way.
 
 Readings are smoothed before a curve sees them, with a shorter time constant
 going up than coming down. A CPU can spike thirty degrees and fall back inside
@@ -275,7 +300,7 @@ $ echo '{"request":"status"}' | socat - UNIX-CONNECT:/run/flydigictl/flydigictl.
 | `{"request":"sensors"}` | temperature inputs the daemon can read, with their current readings |
 | `{"request":"gears"}` | the four speeds stored in the cooler, and whether the supply allows each |
 | `{"request":"set_gear","gear":"quiet","rpm":1500}` | rewrite one of them |
-| `{"request":"light","light":{"light":"effect","mode":3}}` | lighting: `off`, `static`, `effect`, `indicators` |
+| `{"request":"set_lighting","lighting":{"mode":{"mode":"effect","effect":3},"brightness":60,"indicators":true}}` | the whole lighting state at once |
 | `{"request":"set_standby","standby":"delayed"}` | what the cooler does once the host goes away |
 
 A curve names its sensor by hwmon, device and label, and an empty field matches
@@ -294,6 +319,62 @@ a config written against them can end up watching the other drive. The address
 is the PCI slot the chip sits in, plus its i2c address where several chips share
 one bus - two memory sticks on the same SMBus differ only by that. A hand-written
 `device = "nvme0"` still matches, it is simply not dependable.
+
+### NVIDIA
+
+A curve can follow an NVIDIA GPU, which the kernel publishes no hwmon for:
+
+```nix
+services.flydigictl.nvidia.enable = true;
+
+services.flydigictl.settings.curves = [
+  {
+    name = "gpu";
+    sensor = { kind = "nvidia"; label = "core"; };  # or "memory", or empty for the hotter
+    panic_c = 87;
+    points = [
+      { temp_c = 52; rpm = 0; }
+      { temp_c = 53; rpm = 600; }
+      { temp_c = 80; rpm = 2800; }
+      { temp_c = 87; rpm = 4000; }
+    ];
+  }
+];
+```
+
+The reading does **not** come from `nvidia-smi`, and that is the whole point.
+Opening any of the driver's device nodes takes a runtime power reference and
+forces the card to D0, and the driver then wants several idle seconds before it
+will suspend again - so a curve polling every few seconds pins a laptop card
+awake for as long as the daemon runs. Checking the power state first only avoids
+waking a sleeping card; it does nothing about keeping an awake one from ever
+sleeping again.
+
+Instead the daemon maps the card's BAR0 read-only through sysfs and reads the
+registers itself. That path never enters the driver and takes no power
+reference, and a suspended card answers with all ones rather than waking up,
+which the daemon reads as "no temperature, and none needed". Verified on an
+RTX 4060 Laptop: read every three seconds, the card still suspends on schedule.
+
+Two temperatures are exposed. `label = "memory"` is the memory junction, at
+BAR0 `0xE2A8`, twelve bits in thirty-seconds of a degree - the only way to get it
+at all on Ada, where `nvidia-smi` reports `N/A`. `label = "core"` is the die, at
+BAR0 `0x20400`, whole degrees in the low byte; nobody documents that one, so it
+was found by dumping the therm aperture at known temperatures and keeping what
+tracked them, then checked against `nvidia-smi` over a cooling run. An empty
+label follows whichever of the two is hotter. Both matter: under a
+bandwidth-bound load the memory runs far ahead of the die, and it has no fan of
+its own.
+
+This needs two things from the system. The kernel command line must carry
+`iomem=relaxed`, because the driver claims the aperture and `iomem_is_exclusive`
+otherwise refuses the mapping; the NixOS module warns if it is missing. And the
+daemon needs read access to `/sys/bus/pci/devices/<address>/resource0`, which
+the kernel creates root-owned and `0600` with no way to ask for anything else -
+the module ships a udev rule that gives group `flydigi` read access to it on
+NVIDIA display controllers. A curve that cannot read its card says so rather
+than quietly going missing: it is listed as unreadable in the status and shown
+as `cannot read` in the interface.
 
 Ask the daemon for the sensor list rather than reading `/sys/class/hwmon`
 directly. The two can disagree: systemd's `PrivateNetwork=` gives a service its

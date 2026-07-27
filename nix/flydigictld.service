@@ -1,0 +1,39 @@
+[Unit]
+Description=Flydigi cooler fan curve daemon
+# systemd puts the socket in a directory the dynamic user cannot write to, so a
+# daemon started without that descriptor has nothing to listen on.
+Requires=flydigictld.socket
+After=flydigictld.socket bluetooth.target
+
+[Service]
+ExecStart=/usr/bin/flydigictld
+Restart=on-failure
+RestartSec=5
+
+DynamicUser=yes
+SupplementaryGroups=flydigi
+
+DevicePolicy=closed
+DeviceAllow=char-hidraw rw
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+# No PrivateNetwork: sysfs is tagged by network namespace, so a private one
+# hides every hwmon behind a network device, a Wi-Fi card's temperature among
+# them. RestrictAddressFamilies already stops this opening a network socket.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
