@@ -1,20 +1,54 @@
 version: 2
 
 builds:
-  - builder: rust
+  # One build per binary: the Rust builder copies a single file out of the
+  # target directory, so a second entry is what puts the daemon in the archive
+  # the units already point at.
+  - id: cli
+    builder: rust
+    binary: flydigictl
     tool: cargo
     command: build
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
 
+  - id: daemon
+    builder: rust
+    binary: flydigictld
+    tool: cargo
+    command: build
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+
+  # x86_64 only: the interface links against the windowing and rendering stack,
+  # and cross-building that wants the whole set of arm64 development libraries
+  # on the runner.
+  - id: gui
+    builder: rust
+    binary: flydigictl-gui
+    tool: cargo
+    command: build
+    flags:
+      - --release
+      - --features=gui
+      - --bin=flydigictl-gui
+    targets:
+      - x86_64-unknown-linux-gnu
+
 archives:
   - formats:
       - tar.gz
 
 nfpms:
-  - package_name: flydigictl
+  - id: base
+    package_name: flydigictl
+    ids:
+      - cli
+      - daemon
     description: Control Flydigi BS series laptop coolers on Linux
+    maintainer: ElXreno <elxreno@gmail.com>
     license: MIT
     formats:
       - deb
@@ -34,6 +68,54 @@ nfpms:
     scripts:
       preinstall: nix/package-scripts/preinstall.sh
       postinstall: nix/package-scripts/postinstall.sh
+
+  - id: interface
+    package_name: flydigictl-gui
+    ids:
+      - gui
+    description: Desktop interface for Flydigi BS series laptop coolers
+    maintainer: ElXreno <elxreno@gmail.com>
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    dependencies:
+      - flydigictl
+    contents:
+      - src: nix/flydigictl-gui.desktop
+        dst: /usr/share/applications/flydigictl-gui.desktop
+    # Every one of these is opened by name at runtime rather than linked, so
+    # the binary's own headers name none of them: the list comes from the
+    # sonames in the binary.
+    overrides:
+      deb:
+        dependencies:
+          - flydigictl
+          - libwayland-client0
+          - libwayland-egl1
+          - libxkbcommon0
+          - libxkbcommon-x11-0
+          - libvulkan1
+          - libegl1
+          - libx11-6
+          - libx11-xcb1
+          - libxcb1
+          - libxcursor1
+          - libxi6
+      rpm:
+        dependencies:
+          - flydigictl
+          - libwayland-client.so.0()(64bit)
+          - libwayland-egl.so.1()(64bit)
+          - libxkbcommon.so.0()(64bit)
+          - libxkbcommon-x11.so.0()(64bit)
+          - libvulkan.so.1()(64bit)
+          - libEGL.so.1()(64bit)
+          - libX11.so.6()(64bit)
+          - libX11-xcb.so.1()(64bit)
+          - libxcb.so.1()(64bit)
+          - libXcursor.so.1()(64bit)
+          - libXi.so.6()(64bit)
 
 changelog:
   disable: true

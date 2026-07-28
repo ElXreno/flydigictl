@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Flydigi Cooler
+Comment=Fan curves and lighting for a Flydigi BS series cooler
+Exec=flydigictl-gui
+Icon=preferences-system
+Terminal=false
+Categories=System;Settings;HardwareSettings;

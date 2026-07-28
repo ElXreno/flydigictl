@@ -62,7 +62,6 @@
               cargoExtraArgs = "--features gui --bin flydigictl-gui";
               nativeBuildInputs = common.nativeBuildInputs ++ [
                 pkgs.pkg-config
-                pkgs.copyDesktopItems
               ];
               buildInputs = guiLibraries;
               doCheck = false;
@@ -93,21 +92,12 @@
                     $out/bin/flydigictl-gui
                 '';
 
-                desktopItems = [
-                  (pkgs.makeDesktopItem {
-                    name = "flydigictl-gui";
-                    desktopName = "Flydigi Cooler";
-                    comment = "Fan curves and lighting for a Flydigi BS series cooler";
-                    exec = "flydigictl-gui";
-                    icon = "preferences-system";
-                    terminal = false;
-                    categories = [
-                      "System"
-                      "Settings"
-                      "HardwareSettings"
-                    ];
-                  })
-                ];
+                # The same file the deb and rpm install, so the entry cannot
+                # drift between the two ways of shipping this.
+                postInstall = ''
+                  install -Dm644 ${./nix/flydigictl-gui.desktop} \
+                    $out/share/applications/flydigictl-gui.desktop
+                '';
 
                 meta = {
                   description = "Desktop interface for the Flydigi cooler daemon";

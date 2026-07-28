@@ -9,3 +9,6 @@ result
 
 # direnv
 .direnv/
+
+# goreleaser output
+/dist/
