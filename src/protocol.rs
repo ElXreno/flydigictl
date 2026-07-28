@@ -259,6 +259,23 @@ impl Supply {
         }
     }
 
+    /// The ceiling, but only where the cooler has actually said what it has.
+    ///
+    /// A level of zero means the firmware has not finished measuring - it does
+    /// that once per power-up and takes up to three and a half seconds - so
+    /// promising the full speed on the strength of it is how an interface ends
+    /// up advertising 4000 while the fan holds 3300.
+    pub fn known_max_rpm(self) -> Option<u16> {
+        match self {
+            Self::Unknown(_) => None,
+            known => Some(known.max_rpm()),
+        }
+    }
+
+    pub fn decided(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+
     /// The highest gear that can be selected right now.
     pub fn max_gear(self) -> Gear {
         match self {

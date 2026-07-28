@@ -39,6 +39,9 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How long every curve has to agree the fan can stop before it is stopped.
 const STOP_AFTER: Duration = Duration::from_secs(60);
 
+/// How long to keep asking a freshly connected cooler what supply it has.
+const SUPPLY_SETTLE: Duration = Duration::from_secs(5);
+
 /// Lighting reports sent back to back are dropped by the cooler.
 const LIGHT_GAP: Duration = Duration::from_millis(5);
 
@@ -542,6 +545,11 @@ fn control_loop(
     let mut idle_since: Option<Instant> = None;
 
     let mut supply: Option<protocol::Supply> = None;
+
+    // The firmware measures its supply once per power-up and answers zero until
+    // it has, which takes up to three and a half seconds, so the first answer
+    // after a connection is often no answer at all and has to be asked again.
+    let mut asked_supply_since: Option<Instant> = None;
     let mut strip_on: Option<bool> = None;
 
     // Not left in the config struct: `set_config` replaces that wholesale, so
@@ -777,7 +785,8 @@ fn control_loop(
 
                         supply = read_supply(dev);
                         warned_about_supply = false;
-                        if let Some(supply) = supply {
+                        asked_supply_since = Some(Instant::now());
+                        if let Some(supply) = supply.filter(|supply| supply.decided()) {
                             info!("supply {supply}, up to {} rpm", supply.max_rpm());
                         }
 
@@ -817,6 +826,23 @@ fn control_loop(
                     shared.lock().unwrap().publish(None);
                     continue;
                 };
+
+                // Ask again while the cooler is still making up its mind, and
+                // stop asking once it has or once it has had long enough.
+                if supply.is_none_or(|supply| !supply.decided()) {
+                    if let Some(since) = asked_supply_since {
+                        if since.elapsed() < SUPPLY_SETTLE {
+                            supply = read_supply(dev);
+                            if let Some(supply) = supply.filter(|supply| supply.decided()) {
+                                info!("supply {supply}, up to {} rpm", supply.max_rpm());
+                                asked_supply_since = None;
+                            }
+                        } else {
+                            warn!("the cooler never said what supply it has");
+                            asked_supply_since = None;
+                        }
+                    }
+                }
 
                 if config.lights_follow_screens
                     && screens_checked.is_none_or(|last| last.elapsed() >= SCREEN_POLL)
@@ -1005,7 +1031,7 @@ fn control_loop(
                                 manual: manual_rpm.is_some(),
                                 manual_rpm,
                                 supply: supply.map(|supply| supply.to_string()),
-                                supply_max_rpm: supply.map(|supply| supply.max_rpm()),
+                                supply_max_rpm: supply.and_then(|supply| supply.known_max_rpm()),
                                 lighting,
                                 strip_on,
                                 leading: leader.as_ref().map(|d| d.name.clone()),
