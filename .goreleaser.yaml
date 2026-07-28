@@ -1,9 +1,6 @@
 version: 2
 
 builds:
-  # One build per binary: the Rust builder copies a single file out of the
-  # target directory, so a second entry is what puts the daemon in the archive
-  # the units already point at.
   - id: cli
     builder: rust
     binary: flydigictl
@@ -22,9 +19,6 @@ builds:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
 
-  # x86_64 only: the interface links against the windowing and rendering stack,
-  # and cross-building that wants the whole set of arm64 development libraries
-  # on the runner.
   - id: gui
     builder: rust
     binary: flydigictl-gui
@@ -36,10 +30,22 @@ builds:
       - --bin=flydigictl-gui
     targets:
       - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
 
 archives:
-  - formats:
+  - id: base
+    ids:
+      - cli
+      - daemon
+    formats:
       - tar.gz
+
+  - id: interface
+    ids:
+      - gui
+    formats:
+      - tar.gz
+    name_template: "flydigictl-gui_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 nfpms:
   - id: base
@@ -56,7 +62,6 @@ nfpms:
     contents:
       - src: nix/70-flydigi-cooler.rules
         dst: /usr/lib/udev/rules.d/70-flydigi-cooler.rules
-      # Without these the packages ship a daemon with nothing to start it.
       - src: nix/flydigictld.service
         dst: /usr/lib/systemd/system/flydigictld.service
       - src: nix/flydigictld.socket
@@ -79,14 +84,9 @@ nfpms:
     formats:
       - deb
       - rpm
-    dependencies:
-      - flydigictl
     contents:
       - src: nix/flydigictl-gui.desktop
         dst: /usr/share/applications/flydigictl-gui.desktop
-    # Every one of these is opened by name at runtime rather than linked, so
-    # the binary's own headers name none of them: the list comes from the
-    # sonames in the binary.
     overrides:
       deb:
         dependencies:
