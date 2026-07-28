@@ -1180,6 +1180,9 @@ fn speed_card(state: &State) -> Element<'_, Message> {
     let leading = match (&status.leading, status.manual) {
         (_, true) => "held by hand".to_string(),
         (Some(name), _) => format!("led by {name}"),
+        // No leader with readings in hand is not the same as no readings: the
+        // first means every curve is content, the second means none has run.
+        (None, _) if !status.demands.is_empty() => "every curve is content".to_string(),
         (None, _) => "no reading yet".to_string(),
     };
 
