@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/ElXreno/flydigictl/compare/v0.1.1...v0.1.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* give the interface its own archive on both architectures ([d0406ed](https://github.com/ElXreno/flydigictl/commit/d0406ed8ff25e22a967eb5bce35bcf644dedd486))
+
 ## [0.1.1](https://github.com/ElXreno/flydigictl/compare/v0.1.0...v0.1.1) (2026-07-28)
 
 
