@@ -5,6 +5,11 @@ Control Flydigi BS series laptop coolers on Linux.
 > **WARNING:** This project is fully vibe-coded with [Claude Opus 5](https://docs.anthropic.com/en/docs/about-claude/models).
 > It writes directly to HID devices. Use at your own risk.
 
+![The curve editor](docs/screenshots/curve.png)
+
+A curve per subsystem, dragged into shape and applied as you let go. The speeds
+stored in the cooler and the side strip get a tab each.
+
 ## Tested Hardware
 
 | Cooler          | Connection            |
