@@ -1,6 +1,6 @@
 [package]
 name = "flydigictl"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Control Flydigi BS series laptop coolers on Linux"
 repository = "https://github.com/ElXreno/flydigictl"
