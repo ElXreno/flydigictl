@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/ElXreno/flydigictl/compare/v0.1.0...v0.1.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* ship the daemon and the interface in the packages ([fba3a88](https://github.com/ElXreno/flydigictl/commit/fba3a88ddc40161bb7b6e3dbad42702f37a30f24))
+
 ## 0.1.0 (2026-07-28)
 
 
