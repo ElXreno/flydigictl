@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/ElXreno/flydigictl/compare/v0.1.2...v0.1.3) (2026-07-28)
+
+
+### Bug Fixes
+
+* ask again when the cooler has not measured its supply yet ([2a6767f](https://github.com/ElXreno/flydigictl/commit/2a6767fad2c6618f9c80f25725001ebe5769c0f3))
+* say when every curve is content instead of claiming no readings ([6b0b510](https://github.com/ElXreno/flydigictl/commit/6b0b510d4c452dfd540fa2a2f518d189a66e914c))
+
 ## [0.1.2](https://github.com/ElXreno/flydigictl/compare/v0.1.1...v0.1.2) (2026-07-28)
 
 
