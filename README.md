@@ -12,9 +12,9 @@ stored in the cooler and the side strip get a tab each.
 
 ## Tested Hardware
 
-| Cooler          | Connection            |
-|-----------------|-----------------------|
-| Flydigi BS3 Pro | Bluetooth (PID `1004`)|
+| Cooler          | Connection                       |
+|-----------------|----------------------------------|
+| Flydigi BS3 Pro | Bluetooth and USB (PID `1004`)   |
 
 BS2, BS2 Pro and BS3 share the same protocol and should work over both
 Bluetooth and USB, but are untested. BS1 speaks BLE instead of HID and is not
@@ -23,25 +23,37 @@ supported. Open an issue with your model either way.
 ## Requirements
 
 - Linux with `hidraw` support
-- The cooler paired through your system's Bluetooth settings
+- The cooler on a USB-C cable, or paired through your Bluetooth settings
 - Read/write access to the hidraw device (via udev rule or root)
+
+Both transports work and carry the same protocol. A cooler plugged into the
+machine it cools appears on both at once, and the cable is preferred: it does
+not drop out when the charger renegotiates power.
+
+The catch is that the cooler has one USB-C socket, so the cable is either data
+or a proper supply, never both. Fed from a laptop port it reports supply level
+1 and the firmware caps the fan at 2700 RPM; on a 9V/3A adapter it reports
+level 3 and will do the rated 4000, but then it can only be controlled over
+Bluetooth. `flydigictl status` shows which of the two is in use and what the
+supply allows.
 
 ## Usage
 
 ```console
 $ flydigictl list
-/dev/hidraw8  BS3 Pro
+/dev/hidraw0  BS3 Pro
+/dev/hidraw9  BS3 Pro
 
 $ flydigictl status
-current 1700 rpm   target 1700 rpm   mode gear   gear quiet (max overclock)
+current 1700 rpm   target 1700 rpm   mode gear   gear quiet   supply low   cable and bluetooth
 
 $ flydigictl set 2600
 target 2600 rpm
 
 $ flydigictl watch -n 3
-current 1800 rpm   target 2600 rpm   mode realtime   gear quiet (max overclock)
-current 2100 rpm   target 2600 rpm   mode realtime   gear quiet (max overclock)
-current 2400 rpm   target 2600 rpm   mode realtime   gear quiet (max overclock)
+current 1800 rpm   target 2600 rpm   mode realtime   gear quiet   supply full   bluetooth
+current 2100 rpm   target 2600 rpm   mode realtime   gear quiet   supply full   bluetooth
+current 2400 rpm   target 2600 rpm   mode realtime   gear quiet   supply full   bluetooth
 
 $ flydigictl auto
 released to gear mode

@@ -35,6 +35,31 @@ rather than `idVendor`, which only exists for USB-attached devices.
 
 BS1 speaks BLE rather than HID and is not covered here.
 
+### Two transports at once
+
+A cooler plugged into the machine it cools shows up **twice**: once over
+Bluetooth (`HID_ID` bus `0005`) and once over USB (bus `0003`), on nodes whose
+numbers change from boot to boot. Both carry the same protocol, but they are
+framed differently, because the USB descriptor declares no report IDs at all:
+
+| | Bluetooth | USB |
+|---|---|---|
+| report IDs declared | `0x01` in, `0x02` out | none |
+| bytes read | 25 | 32 |
+| bytes written | 25 | 31 |
+| first byte read | report ID `0x01` | `0x03`, part of the data |
+| first byte written | report ID `0x02` | the magic itself |
+
+So a write over USB starts straight at `5A A5` and is padded to 31 bytes, and a
+frame read over USB has a constant `0x03` where Bluetooth has its report ID.
+Recognise a frame by the magic at offset 1 rather than by that byte.
+
+Which one to prefer is not only a software question: the cable feeds the cooler
+from the host, and a laptop port gives it supply level 1, capping the fan at
+2700 RPM. A PD adapter in the same port gives level 3 and the full 4000, but
+then control has to go over Bluetooth, because the cooler has exactly one
+USB-C socket.
+
 ## Frames
 
 Both directions use 25-byte reports:
@@ -103,7 +128,7 @@ arrive, and the interval does not change with fan speed or mode.
 | 1-2    | 2    | Magic `5A A5`                                                |
 | 3      | 1    | Command `0xEF`                                               |
 | 4      | 1    | Length (`0x0D` = 13)                                         |
-| 5      | 1    | High nibble: highest allowed gear; low nibble: selected gear |
+| 5      | 1    | Flags, see below                                             |
 | 6      | 1    | Mode bits, see below                                         |
 | 7      | 1    | Unknown, `0x05` in every capture                             |
 | 8-9    | 2    | Current fan speed, RPM, little-endian                        |
@@ -111,6 +136,26 @@ arrive, and the interval does not change with fan speed or mode.
 | 12-13  | 2    | Unknown, `01 01` in every capture                            |
 | 14-15  | 2    | Sequence counter, little-endian, wraps                       |
 | 16     | 1    | Checksum                                                     |
+
+Byte 5 is a bitfield too, and the "high nibble is the gear ceiling" reading
+this document carried until 2026-08 was wrong. It survived because the supply
+level in bits 5-6 sits exactly where that ceiling was imagined, so a cooler on
+a PD adapter reported `0x6` and printed as "max overclock" - the same 3 wearing
+a different name. A cooler on a cable sets bit 4 as well and the fiction falls
+apart, printing an impossible gear:
+
+| Bits | Field                                             |
+|------|---------------------------------------------------|
+| 0    | asleep                                            |
+| 1-2  | selected gear minus one (0-3)                     |
+| 3    | Bluetooth link up                                 |
+| 4    | USB host configured                               |
+| 5-6  | supply level: 0 undecided, else 1-3               |
+| 7    | demo mode                                         |
+
+The supply level arriving in every frame makes the `0x07` query redundant for
+anything that already reads status: it is measured once per power-up and
+reported twice a second thereafter.
 
 The mode byte is a bitfield, not an enum: bit 0 is the realtime override, bit 2
 is instant standby, bit 3 is delayed standby, and bit 1 is always set. Measured
