@@ -767,7 +767,11 @@ pub struct Frame<'a> {
 /// Validate an incoming report and split out its command and payload.
 /// Returns `None` for malformed frames and checksum mismatches.
 pub fn parse_frame(buf: &[u8]) -> Option<Frame<'_>> {
-    if buf.len() < 6 || buf[0] != REPORT_ID_IN || buf[1..3] != MAGIC {
+    // Over Bluetooth the leading byte is the report id the kernel prepends;
+    // over USB the descriptor declares no report ids at all and the byte is
+    // the firmware's own, a constant 0x03. Either way the magic follows it, so
+    // the magic is what a frame is recognised by.
+    if buf.len() < 6 || buf[1..3] != MAGIC {
         return None;
     }
 

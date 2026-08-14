@@ -16,9 +16,39 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use crate::error::{Error, Result};
 use crate::protocol::{self, Model, Status, VID};
 
+/// How the cooler is attached, which decides how a report is framed.
+///
+/// Over Bluetooth the report descriptor declares ids, so the kernel prepends
+/// one and the reports are 25 bytes. Over USB it declares none: writes are 31
+/// bytes starting at the magic, and reads are 32 starting at a constant 0x03
+/// that belongs to the firmware rather than to HID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Usb,
+    Bluetooth,
+}
+
+impl Transport {
+    fn from_bus(bus: u32) -> Self {
+        match bus {
+            0x03 => Self::Usb,
+            _ => Self::Bluetooth,
+        }
+    }
+
+    /// Bytes a written report must have, and where its magic starts.
+    fn write_shape(self) -> (usize, usize) {
+        match self {
+            Self::Usb => (31, 1),
+            Self::Bluetooth => (protocol::REPORT_LEN, 0),
+        }
+    }
+}
+
 pub struct Found {
     pub path: PathBuf,
     pub model: Model,
+    pub transport: Transport,
 }
 
 /// Scan `/sys/class/hidraw` for Flydigi BS series coolers.
@@ -33,44 +63,55 @@ pub fn find_all() -> Vec<Found> {
         .collect();
     names.sort();
 
-    names
+    let mut found: Vec<Found> = names
         .iter()
         .filter_map(|name| {
             let uevent = Path::new("/sys/class/hidraw")
                 .join(name)
                 .join("device/uevent");
             let text = std::fs::read_to_string(&uevent).ok()?;
-            let model = parse_hid_id(&text)?;
-            debug!("{name}: matched {}", model.name());
+            let (model, transport) = parse_hid_id(&text)?;
+            debug!("{name}: matched {} over {transport:?}", model.name());
             Some(Found {
                 path: PathBuf::from("/dev").join(name),
                 model,
+                transport,
             })
         })
-        .collect()
+        .collect();
+
+    // The wired path first: it survives the power renegotiation that drops the
+    // Bluetooth link, and a cooler plugged into this machine is on both at
+    // once. Names are no guide - which node is which changes across reboots.
+    found.sort_by_key(|found| match found.transport {
+        Transport::Usb => 0,
+        Transport::Bluetooth => 1,
+    });
+    found
 }
 
 /// Extract the model from a `HID_ID=bus:vendor:product` line.
-fn parse_hid_id(uevent: &str) -> Option<Model> {
+fn parse_hid_id(uevent: &str) -> Option<(Model, Transport)> {
     let hid_id = uevent
         .lines()
         .find_map(|line| line.strip_prefix("HID_ID="))?;
 
     let mut parts = hid_id.split(':');
-    let _bus = parts.next()?;
+    let bus = u32::from_str_radix(parts.next()?, 16).ok()?;
     let vendor = u32::from_str_radix(parts.next()?, 16).ok()?;
     let product = u32::from_str_radix(parts.next()?, 16).ok()?;
 
     if vendor != VID as u32 {
         return None;
     }
-    Model::from_pid(product as u16)
+    Some((Model::from_pid(product as u16)?, Transport::from_bus(bus)))
 }
 
 pub struct Device {
     file: File,
     pub model: Model,
     pub path: PathBuf,
+    pub transport: Transport,
 }
 
 impl Device {
@@ -80,6 +121,7 @@ impl Device {
             Some(path) => Found {
                 path: path.to_path_buf(),
                 model: probe_model(path).unwrap_or(Model::Bs3Pro),
+                transport: transport_of(path).unwrap_or(Transport::Bluetooth),
             },
             None => find_all().into_iter().next().ok_or(Error::NotFound)?,
         };
@@ -97,11 +139,25 @@ impl Device {
             file,
             model: found.model,
             path: found.path,
+            transport: found.transport,
         })
     }
 
+    /// Write a report, reshaped for the transport this cooler is on.
+    ///
+    /// Reports are built in the Bluetooth shape everywhere else; the USB path
+    /// wants the same bytes without the leading report id and padded to its
+    /// own length, which is what the descriptor asks for.
     pub fn send(&mut self, report: impl AsRef<[u8]>) -> Result<()> {
-        self.file.write_all(report.as_ref()).map_err(Error::Write)
+        let report = report.as_ref();
+        let (len, from) = self.transport.write_shape();
+
+        let mut framed = vec![0u8; len];
+        let body = &report[from..];
+        let end = body.len().min(len);
+        framed[..end].copy_from_slice(&body[..end]);
+
+        self.file.write_all(&framed).map_err(Error::Write)
     }
 
     /// Send a command and wait for the device to acknowledge it, returning the
@@ -204,6 +260,14 @@ impl Device {
 }
 
 fn probe_model(path: &Path) -> Option<Model> {
+    Some(probe(path)?.0)
+}
+
+fn transport_of(path: &Path) -> Option<Transport> {
+    Some(probe(path)?.1)
+}
+
+fn probe(path: &Path) -> Option<(Model, Transport)> {
     let name = path.file_name()?.to_str()?;
     let uevent = Path::new("/sys/class/hidraw")
         .join(name)
@@ -218,13 +282,57 @@ mod tests {
     #[test]
     fn matches_bluetooth_attached_cooler() {
         let uevent = "DRIVER=hid-generic\nHID_ID=0005:000037D7:00001004\nHID_NAME=FlyDigi BS3PRO\n";
-        assert_eq!(parse_hid_id(uevent), Some(Model::Bs3Pro));
+        assert_eq!(
+            parse_hid_id(uevent),
+            Some((Model::Bs3Pro, Transport::Bluetooth))
+        );
     }
 
     #[test]
     fn matches_usb_attached_cooler() {
         let uevent = "HID_ID=0003:000037D7:00001002\n";
-        assert_eq!(parse_hid_id(uevent), Some(Model::Bs2Pro));
+        assert_eq!(parse_hid_id(uevent), Some((Model::Bs2Pro, Transport::Usb)));
+    }
+
+    /// A cooler plugged into this machine appears on both transports at once,
+    /// and the wired one is the one to talk to. Node names say nothing: which
+    /// number each lands on changes from boot to boot.
+    #[test]
+    fn a_wired_cooler_outranks_the_same_one_over_bluetooth() {
+        let mut found = [
+            Found {
+                path: PathBuf::from("/dev/hidraw9"),
+                model: Model::Bs3Pro,
+                transport: Transport::Bluetooth,
+            },
+            Found {
+                path: PathBuf::from("/dev/hidraw0"),
+                model: Model::Bs3Pro,
+                transport: Transport::Usb,
+            },
+        ];
+
+        found.sort_by_key(|found| match found.transport {
+            Transport::Usb => 0,
+            Transport::Bluetooth => 1,
+        });
+
+        assert_eq!(found[0].transport, Transport::Usb);
+    }
+
+    /// Written reports are built in the Bluetooth shape; the USB path drops the
+    /// report id and pads to its own length.
+    #[test]
+    fn usb_writes_start_at_the_magic() {
+        let report = protocol::query_supply();
+        assert_eq!(report[0], protocol::REPORT_ID_OUT);
+
+        let (len, from) = Transport::Usb.write_shape();
+        assert_eq!(len, 31);
+        assert_eq!(&report[from..from + 2], &[0x5A, 0xA5]);
+
+        let (len, from) = Transport::Bluetooth.write_shape();
+        assert_eq!((len, from), (protocol::REPORT_LEN, 0));
     }
 
     #[test]
