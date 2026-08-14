@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3](https://github.com/ElXreno/flydigictl/compare/v0.1.2...v0.1.3) (2026-08-14)
+
+
+### Bug Fixes
+
+* ask again when the cooler has not measured its supply yet ([2a6767f](https://github.com/ElXreno/flydigictl/commit/2a6767fad2c6618f9c80f25725001ebe5769c0f3))
+* decode the status flags instead of inventing a gear ceiling ([dffccaf](https://github.com/ElXreno/flydigictl/commit/dffccaf85c0c0fba73ac0a0228a539f22cc0eaa7))
+* say when every curve is content instead of claiming no readings ([6b0b510](https://github.com/ElXreno/flydigictl/commit/6b0b510d4c452dfd540fa2a2f518d189a66e914c))
+* talk to a cooler on the cable, and prefer it ([b20de54](https://github.com/ElXreno/flydigictl/commit/b20de54b44c92b9a9fc6e5d25df3f90cd65fd524))
+
 ## [0.1.2](https://github.com/ElXreno/flydigictl/compare/v0.1.1...v0.1.2) (2026-07-28)
 
 
