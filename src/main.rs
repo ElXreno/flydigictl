@@ -201,9 +201,16 @@ fn parse_color(text: &str) -> Result<protocol::Rgb> {
 }
 
 fn print_status(status: &protocol::Status) {
+    let link = match (status.usb, status.bluetooth) {
+        (true, true) => "cable and bluetooth",
+        (true, false) => "cable",
+        (false, true) => "bluetooth",
+        (false, false) => "no link",
+    };
+
     println!(
-        "current {:4} rpm   target {:4} rpm   mode {:8}   gear {} (max {})",
-        status.current_rpm, status.target_rpm, status.mode, status.gear, status.max_gear
+        "current {:4} rpm   target {:4} rpm   mode {:8}   gear {}   supply {}   {link}",
+        status.current_rpm, status.target_rpm, status.mode, status.gear, status.supply
     );
 }
 

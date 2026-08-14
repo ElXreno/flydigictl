@@ -1177,6 +1177,15 @@ fn speed_card(state: &State) -> Element<'_, Message> {
         _ => "supply unknown".to_string(),
     };
 
+    // Which way the daemon is talking to it, since a cable and Bluetooth are
+    // not interchangeable here: the cable feeds the cooler from this machine
+    // and caps how fast it may spin.
+    let link = match status.transport.as_deref() {
+        Some("cable") => "over the cable",
+        Some("bluetooth") => "over bluetooth",
+        _ => "",
+    };
+
     let leading = match (&status.leading, status.manual) {
         (_, true) => "held by hand".to_string(),
         (Some(name), _) => format!("led by {name}"),
@@ -1193,6 +1202,7 @@ fn speed_card(state: &State) -> Element<'_, Message> {
             text(format!("target {target}")).size(13),
             text(leading).size(13),
             text(supply).size(12),
+            text(link).size(12),
         ]
         .spacing(4)
         .into(),

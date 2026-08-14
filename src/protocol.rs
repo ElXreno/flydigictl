@@ -144,10 +144,7 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Gear, encoded in the two nibbles of byte 5.
-///
-/// The selected gear and the ceiling use different encodings: `8/A/C/E` for the
-/// former, `2/4/6` for the latter.
+/// One of the four speeds the cooler stores and its button cycles through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gear {
     Quiet,
@@ -158,21 +155,13 @@ pub enum Gear {
 }
 
 impl Gear {
-    fn selected(nibble: u8) -> Self {
-        match nibble {
-            0x8 => Self::Quiet,
-            0xA => Self::Standard,
-            0xC => Self::Strong,
-            0xE => Self::Overclock,
-            other => Self::Unknown(other),
-        }
-    }
-
-    fn ceiling(nibble: u8) -> Self {
-        match nibble {
-            0x2 => Self::Standard,
-            0x4 => Self::Strong,
-            0x6 => Self::Overclock,
+    /// The gear by its one-based number, which is how the status frame counts.
+    fn nth(number: u8) -> Self {
+        match number {
+            1 => Self::Quiet,
+            2 => Self::Standard,
+            3 => Self::Strong,
+            4 => Self::Overclock,
             other => Self::Unknown(other),
         }
     }
@@ -442,10 +431,17 @@ pub struct Status {
     /// Standby setting the cooler reports, which is where it is actually
     /// stored: the daemon can check its config took effect.
     pub standby: Standby,
-    /// Highest gear the device will use.
-    pub max_gear: Gear,
     /// Currently selected gear.
     pub gear: Gear,
+    /// Supply level the cooler measured for itself, which is what caps its
+    /// speed. Reported in every frame, so nothing has to ask for it.
+    pub supply: Supply,
+    /// Whether the Bluetooth link is up and whether a USB host has configured
+    /// it: a cooler on a cable reports both, one on battery only the first.
+    pub bluetooth: bool,
+    pub usb: bool,
+    /// Asleep, which it does on its own once the host goes away.
+    pub asleep: bool,
     /// Monotonic counter, wraps; useful for spotting dropped frames.
     pub seq: u16,
 }
@@ -799,9 +795,19 @@ pub fn parse_status(buf: &[u8]) -> Option<Status> {
         return None;
     }
 
+    // Byte 5 of the report is a bitfield, not two nibbles. Reading it as a
+    // pair of nibbles happened to look right on a Bluetooth capture, where the
+    // supply level in bits 5-6 lands where a gear ceiling would be and reads
+    // back as "overclock"; a cooler on a cable sets bit 4 as well and the
+    // pretence falls apart.
+    let flags = payload[0];
+
     Some(Status {
-        max_gear: Gear::ceiling(payload[0] >> 4),
-        gear: Gear::selected(payload[0] & 0x0F),
+        gear: Gear::nth(((flags >> 1) & 0x03) + 1),
+        supply: Supply::from_byte((flags >> 5) & 0x03),
+        bluetooth: flags & 0x08 != 0,
+        usb: flags & 0x10 != 0,
+        asleep: flags & 0x01 != 0,
         mode: Mode::from_byte(payload[1]),
         standby: Standby::from_mode_byte(payload[1]),
         current_rpm: u16::from_le_bytes([payload[3], payload[4]]),
@@ -827,9 +833,38 @@ mod tests {
         assert_eq!(status.target_rpm, 1900);
         assert_eq!(status.mode, Mode::Realtime);
         assert_eq!(status.standby, Standby::Off);
-        assert_eq!(status.max_gear, Gear::Overclock);
         assert_eq!(status.gear, Gear::Quiet);
         assert_eq!(status.seq, 0x23B4);
+
+        // Byte 5 of that capture is 0x68: awake, gear 1, Bluetooth up, no USB
+        // host, supply level 3. Read as two nibbles it looked like a gear
+        // ceiling of "overclock", which is the same three in disguise.
+        assert_eq!(status.supply, Supply::Full);
+        assert!(status.bluetooth);
+        assert!(!status.usb);
+        assert!(!status.asleep);
+    }
+
+    /// A frame captured over the cable, where the cooler runs on what the
+    /// laptop port gives it.
+    #[test]
+    fn parses_a_frame_from_the_wired_transport() {
+        let mut frame = [0u8; REPORT_LEN];
+        frame[0] = 0x03;
+        frame[1..3].copy_from_slice(&MAGIC);
+        frame[3] = CMD_STATUS_NOTIFY;
+        frame[4] = 0x0D;
+        frame[5..16].copy_from_slice(&[
+            0x38, 0x0A, 0x05, 0xA4, 0x06, 0xA4, 0x06, 0x01, 0x00, 0xBC, 0xBC,
+        ]);
+        frame[16] = checksum(CMD_STATUS_NOTIFY, &frame[5..16]);
+
+        let status = parse_status(&frame).expect("a wired frame parses too");
+        assert_eq!(status.gear, Gear::Quiet);
+        assert_eq!(status.supply, Supply::Low);
+        assert!(status.usb, "the wired frame sets the USB bit");
+        assert!(status.bluetooth);
+        assert_eq!(status.current_rpm, 1700);
     }
 
     #[test]

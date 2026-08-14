@@ -144,6 +144,7 @@ impl Status {
             lighting: None,
             strip_on: None,
             leading: None,
+            transport: None,
             asleep: Vec::new(),
             unreadable: Vec::new(),
             revision: 0,
@@ -188,6 +189,11 @@ pub struct Status {
 
     /// Curve currently setting the speed, so a client can say *why* it is loud.
     pub leading: Option<String>,
+
+    /// How the daemon reached the cooler: `cable` or `bluetooth`. A cooler
+    /// plugged into this machine answers on both, and which one is in use
+    /// decides the speed ceiling, so it is worth showing.
+    pub transport: Option<String>,
 
     /// Curves that read nothing because what they watch is asleep. A sleeping
     /// GPU has no temperature to give and must not be woken for one, which is
