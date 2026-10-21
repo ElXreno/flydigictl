@@ -383,6 +383,15 @@ label follows whichever of the two is hotter. Both matter: under a
 bandwidth-bound load the memory runs far ahead of the die, and it has no fan of
 its own.
 
+Consumer Blackwell (RTX 50) moved the thermal block: the daemon tells the
+generation from `NV_PMC_BOOT_0` and reads the core at `0xAD0400` instead, where
+NVIDIA's own `gb202/dev_therm.h` puts the block. Its GDDR7 is read per memory
+controller, as [gddr7-temp](https://github.com/sunnyyangyangyang/gddr7-temp)
+does, and only on cards whose controller count has been checked on hardware -
+past the last controller the aperture is reserved. Checked so far: RTX 5090
+Laptop (GB203). On any other RTX 50 the memory reads as unavailable.
+All offsets live in `src/nvidia/regs.rs`, one table per generation.
+
 This needs two things from the system. The kernel command line must carry
 `iomem=relaxed`, because the driver claims the aperture and `iomem_is_exclusive`
 otherwise refuses the mapping; the NixOS module warns if it is missing. And the

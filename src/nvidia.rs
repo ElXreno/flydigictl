@@ -12,16 +12,16 @@
 //! in D3cold answers the read with all ones rather than waking for it - which
 //! is exactly the "no reading, and none needed" this wants.
 //!
-//! What that register holds is the memory junction temperature, not the core:
-//! the core's is behind the GSP firmware on Ada and has no published register.
-//! For a cooling pad this is the better number anyway. Memory sits under the
-//! same heatspreader with no fan of its own, and on this chassis it runs a few
-//! degrees above the core under mixed load and far above it under bandwidth.
+//! Where they sit depends on the generation: see [`regs`].
+
+mod regs;
 
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
+
+use regs::{Map, Memory};
 
 const PCI: &str = "/sys/bus/pci/devices";
 
@@ -30,28 +30,6 @@ const VENDOR: &str = "0x10de";
 
 /// PCI class for a display controller, of which the first is the GPU.
 const DISPLAY: &str = "0x030";
-
-/// Memory temperature, in BAR0. Twelve bits, in thirty-seconds of a degree.
-///
-/// The same offset across every Ada part, and public knowledge - an address and
-/// a scale, not anybody's code.
-const MEMORY: usize = 0xE2A8;
-
-/// Core temperature, in whole degrees in the low byte.
-///
-/// Not published by anyone: NVIDIA's open headers carry no thermal register
-/// past a scratch word, and nouveau's readers stop at Pascal. Found by dumping
-/// the therm aperture at three known temperatures and keeping what tracked
-/// them, then confirmed against `nvidia-smi` over a cooling run: it follows the
-/// reported temperature one to two degrees ahead of it, the way a maximum over
-/// several sensors follows an average of them. Neighbours at 0x20460, 0x20474,
-/// 0x204B8 and 0x204C4 hold the same thing to a fraction of a degree, in
-/// 24.8 fixed point with bit 30 set; this one is the plain reading.
-const CORE: usize = 0x20400;
-
-/// A suspended card returns all ones for every read, which decodes to 127.97
-/// degrees. No card reports that on purpose, so it is a reliable "asleep".
-const NO_ANSWER: u32 = 0xFFFF_FFFF;
 
 /// Every NVIDIA GPU on the machine, by PCI address.
 pub fn cards() -> Vec<String> {
@@ -84,11 +62,11 @@ fn awake(card: &str) -> Option<bool> {
 /// long as the sensor is.
 ///
 /// Mapping is the expensive half and it survives the card suspending and
-/// resuming, so it is done once. Every map is read-only and a single page: the
-/// two registers wanted are in two of them, and there is no reason to have the
-/// rest of a 16 MB aperture within reach of a stray offset.
+/// resuming, so it is done once. Every map is read-only and a single page,
+/// so the rest of the aperture is never within reach of a stray offset.
 struct Registers {
     pages: Vec<Page>,
+    map: Map,
 }
 
 struct Page {
@@ -112,7 +90,17 @@ impl Registers {
 
         let file = File::open(Path::new(PCI).join(card).join("resource0")).ok()?;
 
-        let mut starts = vec![MEMORY & !(size - 1), CORE & !(size - 1)];
+        let device = read(&Path::new(PCI).join(card), "device")
+            .and_then(|id| u16::from_str_radix(id.trim_start_matches("0x"), 16).ok())?;
+        let boot = Page::map(&file, regs::BOOT_0 & !(size - 1), size)?;
+        let map = regs::map(boot.word(regs::BOOT_0)?, device)?;
+
+        let mut starts: Vec<usize> = map
+            .offsets()
+            .into_iter()
+            .map(|at| at & !(size - 1))
+            .collect();
+        starts.sort_unstable();
         starts.dedup();
 
         let pages = starts
@@ -120,32 +108,25 @@ impl Registers {
             .map(|from| Page::map(&file, from, size))
             .collect::<Option<Vec<_>>>()?;
 
-        Some(Self { pages })
+        Some(Self { pages, map })
     }
 
     fn word(&self, at: usize) -> Option<u32> {
-        let page = self
-            .pages
-            .iter()
-            .find(|page| at >= page.from && at - page.from < page.len.get())?;
-
-        // Safety: the offset was just checked to sit inside this mapping, and
-        // a register read has to be volatile or the compiler is free to hoist
-        // it out of the loop that takes it.
-        Some(unsafe {
-            page.base
-                .add(at - page.from)
-                .cast::<u32>()
-                .read_volatile()
-        })
+        self.pages.iter().find_map(|page| page.word(at))
     }
 
     fn memory(&self) -> Option<u8> {
-        decode_memory(self.word(MEMORY)?)
+        match self.map.memory {
+            Memory::Gddr6(at) => regs::gddr6(self.word(at)?),
+            Memory::Gddr7(gddr7) => gddr7
+                .words()
+                .filter_map(|(word, valid)| regs::gddr7(self.word(word)?, self.word(valid)?))
+                .max(),
+        }
     }
 
     fn core(&self) -> Option<u8> {
-        decode_core(self.word(CORE)?)
+        regs::core(self.word(self.map.core)?)
     }
 }
 
@@ -174,6 +155,16 @@ impl Page {
             from,
         })
     }
+
+    /// The register at `at` in the aperture, if this page holds it.
+    fn word(&self, at: usize) -> Option<u32> {
+        if at < self.from || at - self.from >= self.len.get() {
+            return None;
+        }
+
+        // Safety: inside the mapping per the check above; volatile so it is never hoisted.
+        Some(unsafe { self.base.add(at - self.from).cast::<u32>().read_volatile() })
+    }
 }
 
 impl Drop for Page {
@@ -186,29 +177,6 @@ impl Drop for Page {
             )
         };
     }
-}
-
-/// Twelve bits of thirty-seconds of a degree, and nothing believable outside
-/// what silicon survives.
-fn decode_memory(raw: u32) -> Option<u8> {
-    if raw == NO_ANSWER {
-        return None;
-    }
-
-    believable((raw & 0xFFF) / 32)
-}
-
-/// Whole degrees in the low byte.
-fn decode_core(raw: u32) -> Option<u8> {
-    if raw == NO_ANSWER {
-        return None;
-    }
-
-    believable(raw & 0xFF)
-}
-
-fn believable(degrees: u32) -> Option<u8> {
-    (degrees > 0 && degrees < 127).then_some(degrees as u8)
 }
 
 /// Which of a card's two temperatures to follow.
@@ -279,6 +247,11 @@ impl Sensor {
 
     /// Degrees, or `None` while the card is asleep or unreadable.
     pub fn read(&mut self) -> Option<u8> {
+        // Before opening too: a sleeping card answers BOOT_0 with all ones.
+        if self.sleeping() {
+            return None;
+        }
+
         if self.registers.is_none() {
             // Retry: a card can appear after the daemon starts, and the
             // permissions on its aperture can be granted after that.
@@ -295,13 +268,6 @@ impl Sensor {
             }
             return None;
         };
-
-        // Reading a suspended card is harmless - it answers all ones - but
-        // asking sysfs first says the same thing without a failed transaction
-        // crossing the bus.
-        if self.sleeping() {
-            return None;
-        }
 
         match self.part {
             Part::Core => registers.core(),
@@ -333,33 +299,6 @@ pub fn read_temperature(card: &str, part: Part) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn decodes_thirty_seconds_of_a_degree() {
-        assert_eq!(decode_memory(64 * 32), Some(64));
-        assert_eq!(decode_memory(47 * 32 + 16), Some(47));
-
-        // Only the low twelve bits are the temperature; the top one is a flag.
-        assert_eq!(decode_memory(0x8000_0000 | (50 * 32)), Some(50));
-    }
-
-    #[test]
-    fn decodes_the_core_as_whole_degrees() {
-        // The readings this was found with, taken alongside 42, 47 and 60 from
-        // the vendor tool.
-        assert_eq!(decode_core(0x0000_002C), Some(44));
-        assert_eq!(decode_core(0x0000_0030), Some(48));
-        assert_eq!(decode_core(0x0000_003E), Some(62));
-    }
-
-    #[test]
-    fn refuses_what_a_sleeping_card_answers() {
-        assert_eq!(decode_memory(NO_ANSWER), None);
-        assert_eq!(decode_core(NO_ANSWER), None);
-        assert_eq!(decode_memory(0xFFF), None);
-        assert_eq!(decode_memory(0), None);
-        assert_eq!(decode_core(0), None);
-    }
 
     #[test]
     fn names_the_parts_a_config_can_ask_for() {
