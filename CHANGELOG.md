@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/ElXreno/flydigictl/compare/v0.1.3...v0.2.0) (2026-10-21)
+
+
+### Features
+
+* offer ACPI thermal zones as sensors ([1cf4450](https://github.com/ElXreno/flydigictl/commit/1cf4450c2d86c9bbc372bda1e59e72e866112e53))
+* read RTX 50 core and GDDR7 temperatures ([6c2ca05](https://github.com/ElXreno/flydigictl/commit/6c2ca05b67cc01765314c57f6fb4e991340a6ed1))
+
 ## [0.1.3](https://github.com/ElXreno/flydigictl/compare/v0.1.2...v0.1.3) (2026-08-14)
 
 
