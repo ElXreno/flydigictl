@@ -337,6 +337,16 @@ is the PCI slot the chip sits in, plus its i2c address where several chips share
 one bus - two memory sticks on the same SMBus differ only by that. A hand-written
 `device = "nvme0"` still matches, it is simply not dependable.
 
+ACPI thermal zones are listed too, under `thermal` with the zone's type as the
+label. That is where firmware puts what has no hwmon: on Intel laptops with
+Dynamic Tuning, the board's thermistors (`SEN2`, `SEN3`, ...), one of which is
+usually the air inside the chassis. ACPI names the role (`ssdt*.dsl` from
+`acpidump`); on an MSI Titan 18 HX, `SEN3` is the ambient one:
+
+```nix
+sensor = { hwmon = "thermal"; label = "SEN3"; };
+```
+
 ### NVIDIA
 
 A curve can follow an NVIDIA GPU, which the kernel publishes no hwmon for:

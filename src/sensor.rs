@@ -1,4 +1,4 @@
-//! Temperature sources: plain sysfs hwmon, no external tools.
+//! Temperature sources: plain sysfs hwmon and thermal zones, no external tools.
 
 use std::path::{Path, PathBuf};
 
@@ -24,9 +24,50 @@ pub struct Available {
     pub path: PathBuf,
 }
 
-/// Everything readable under `/sys/class/hwmon`, for `flydigictl sensors` and
-/// for telling the user what they could have written instead.
+/// The hwmon name thermal zones go under, labelled by their `type`.
+pub const THERMAL: &str = "thermal";
+
+/// Everything readable under `/sys/class/hwmon`, then every thermal zone, for
+/// `flydigictl sensors` and for telling the user what they could have written
+/// instead.
 pub fn list() -> Vec<Available> {
+    let mut found = hwmon();
+    found.extend(thermal_zones());
+    found
+}
+
+/// ACPI thermal zones, for what has no hwmon: Intel DTT's thermistors among them.
+fn thermal_zones() -> Vec<Available> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/thermal") else {
+        return Vec::new();
+    };
+
+    let mut zones: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("thermal_zone"))
+        })
+        .collect();
+    zones.sort();
+
+    zones
+        .into_iter()
+        .filter_map(|zone| {
+            Some(Available {
+                hwmon: THERMAL.to_string(),
+                device: String::new(),
+                kernel: zone.file_name()?.to_str()?.to_string(),
+                label: read_trimmed(&zone.join("type"))?,
+                path: zone.join("temp"),
+            })
+        })
+        .collect()
+}
+
+fn hwmon() -> Vec<Available> {
     let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
         return Vec::new();
     };
